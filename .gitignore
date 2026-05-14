@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+
+# Test binaries
+test_*
+!test_*.c
+!test_*.h
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+*.sublime-*
+
+# Demoscene packed builds
+*.packed
+release/
+
+# Local secrets / config
+.env
+.env.local
+
+# Generated / vendored
+third_party/*/
+!third_party/README.md
+!third_party/.gitkeep

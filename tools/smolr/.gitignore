@@ -1,0 +1,8 @@
+build/
+docs/riscv-relocation-survey.md
+*.o
+*.elf
+*.bin
+*.map
+__pycache__/
+*.pyc
