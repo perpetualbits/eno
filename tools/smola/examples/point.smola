@@ -1,0 +1,21 @@
+// Worked example: Point.translate from the spec.
+// Demonstrates struct declaration, method definition, field access.
+
+.smola.struct Point {
+    x: i64,
+    y: i64,
+}
+
+.smola.method Point.translate
+    VAR.A dx
+    VAR.A dy
+    VAR.T cx
+    VAR.T cy
+
+    LOAD_FIELD cx, self, Point.x
+    LOAD_FIELD cy, self, Point.y
+    ADD cx, cx, dx
+    ADD cy, cy, dy
+    STORE_FIELD cx, self, Point.x
+    STORE_FIELD cy, self, Point.y
+.smola.endmethod
