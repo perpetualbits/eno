@@ -1,0 +1,94 @@
+# phrase_motif.spine
+#
+# Prototype A example for SPINE v0.2.
+#
+# A short score fragment that exercises every requirement of §8.3:
+#   - DEF of at least three entities                ✓
+#   - GRP with at least one nested GRP              ✓ (demo_root > scene_intro)
+#   - USE with `at` and `dur` (positioned mode)     ✓ (in scene_intro)
+#   - USE with implicit timing (sequential mode)    ✓ (inside motif_walk)
+#   - USE with overrides (transpose, mute)          ✓
+#   - MOD producing a named variant                 ✓
+#   - MOD operator stacking                         ✓ (motif_high_quick)
+#   - Reachability: an unreachable DEF              ✓ (orphan_chord)
+#
+# Read this file aloud as a short ascending three-note motif, played
+# in scene_intro: as written, transposed up a fifth, up an octave at
+# half duration, back to the original with the middle note muted, and
+# finally the GRP-form of the same motif demonstrating sequential
+# timing.
+#
+# All times are in "beats". One beat = 0.5 seconds at the eventual
+# tempo. Prototype A does not yet care about tempo; the expander just
+# reports beats as a unitless float.
+
+# ----------------------------------------------------------------------
+# Definitions: the building blocks.
+# ----------------------------------------------------------------------
+
+# Individual notes, used by motif_walk below.
+DEF note_C4 : music.note { pitch=C4 }
+DEF note_E4 : music.note { pitch=E4 }
+DEF note_G4 : music.note { pitch=G4 }
+
+# Compact phrase form: three ascending notes spaced one beat apart.
+# This is what scene_intro USEs most of the time. `music.phrase`
+# supports the `mute` operator natively, indexing notes by position
+# in the `notes` vector.
+DEF motif_asc : music.phrase {
+  notes = [C4, E4, G4]
+  step  = 1.0
+}
+
+# GRP form of the same motif. Exercises sequential timing on
+# individual note USEs (no explicit `at` — each note starts when
+# the previous one ended).
+GRP motif_walk {
+  USE note_C4 dur 1.0
+  USE note_E4 dur 1.0
+  USE note_G4 dur 1.0
+}
+
+# A named MOD variant: motif_asc transposed up a perfect fifth.
+MOD motif_asc_5th = motif_asc transpose +7
+
+# Another variant: up an octave AND played twice as fast.
+# Demonstrates MOD operator stacking.
+MOD motif_high_quick = motif_asc transpose +12 stretch 0.5
+
+# A cello instrument is declared but only referenced via LNK; the
+# v0.2 expander records the connection without synthesizing audio.
+DEF cello_main : music.instrument { timbre=warm }
+LNK motif_asc.out -> cello_main.in
+
+# An unreachable definition. Nothing in demo_root or its descendants
+# references this. Reachability analysis must drop it from the
+# expanded output. Run with --dump-reachable to verify.
+DEF orphan_chord : music.phrase {
+  notes = [F3, A3, C4]
+  step  = 0.5
+}
+
+# ----------------------------------------------------------------------
+# Scene: positioned-mode GRP placing motif uses at specific beats.
+# ----------------------------------------------------------------------
+#
+# Each motif USE supplies its own `at` and `dur`, so this is
+# positioned mode. The fourth USE adds `mute=[1]` to silence the
+# middle note of just that instance.
+
+GRP scene_intro {
+  USE motif_asc        at 0.0  dur 3.0
+  USE motif_asc_5th    at 4.0  dur 3.0
+  USE motif_high_quick at 8.0  dur 1.5
+  USE motif_asc        at 12.0 dur 3.0 { mute=[1] }
+  USE motif_walk       at 16.0 dur 3.0
+}
+
+# ----------------------------------------------------------------------
+# Demo root. Reachability walks from here.
+# ----------------------------------------------------------------------
+
+GRP demo_root {
+  USE scene_intro at 0.0
+}

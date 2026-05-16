@@ -1,0 +1,123 @@
+# synth_voice.spine
+#
+# Prototype B example for SPINE v0.2.
+#
+# A small subtractive synth voice patch: oscillator -> filter -> gain
+# -> output, with an envelope modulating the filter cutoff and a
+# music.phrase from the existing music dialect supplying note events
+# to the envelope's trigger port.
+#
+# What this exercises that Prototype A did not:
+#   - A second dialect (`patch`) coexisting with `music`
+#   - LNK doing real work (graph resolution, not just being recorded)
+#   - Port shapes: signal vs value vs event
+#   - Cross-dialect LNK (music.phrase.note_on -> patch.envelope.trigger)
+#   - A deliberate port-shape mismatch to verify the warning path
+#   - MOD on a patch node producing a parameter-overridden variant
+#   - Non-time-positioned GRP semantics (patches don't stretch)
+#
+# Expected output: a resolved graph dump in topological order, plus a
+# warning about the deliberate cross-dialect mismatch.
+
+# ----------------------------------------------------------------------
+# Patch nodes. Each is a DEF with its dialect-defined parameters.
+# ----------------------------------------------------------------------
+
+DEF osc_1 : patch.oscillator {
+  waveform = sawtooth
+  freq     = 220.0
+}
+
+DEF env_1 : patch.envelope {
+  attack  = 0.01
+  decay   = 0.20
+  sustain = 0.70
+  release = 0.40
+}
+
+DEF filt_1 : patch.filter {
+  type   = lowpass
+  cutoff = 1200.0
+  q      = 0.70
+}
+
+DEF amp_1 : patch.gain {
+  gain = 0.80
+}
+
+DEF out_main : patch.output
+
+# ----------------------------------------------------------------------
+# Patch connections. LNK is the load-bearing op for this prototype.
+# ----------------------------------------------------------------------
+
+# Signal path: osc -> filt -> amp -> out
+LNK osc_1.out  -> filt_1.in
+LNK filt_1.out -> amp_1.in
+LNK amp_1.out  -> out_main.in
+
+# Modulation: the envelope's output drives the filter's cutoff
+# parameter. Cutoff is a value port (continuous, slow); the envelope
+# emits a value signal. Shapes match.
+LNK env_1.out -> filt_1.cutoff_mod
+
+# Cross-dialect wiring: a music.phrase's note_on event triggers the
+# envelope. note_on is an event port; trigger is an event port.
+# Shapes match across dialects.
+DEF lead_line : music.phrase {
+  notes = [C4, E4, G4, C5]
+  step  = 0.5
+}
+LNK lead_line.note_on -> env_1.trigger
+
+# ----------------------------------------------------------------------
+# A MOD-derived variant. Same patch graph, but the filter cutoff is
+# nudged up. Demonstrates that MOD on a patch node is non-destructive
+# and produces a first-class entity.
+# ----------------------------------------------------------------------
+
+MOD filt_bright = filt_1 set cutoff 2400.0
+
+# A second signal path using the MOD-derived filter variant. Exercises
+# the resolution of MOD-on-patch in a reachable context.
+DEF osc_2 : patch.oscillator { waveform=sawtooth freq=440.0 }
+DEF amp_2 : patch.gain { gain=0.5 }
+LNK osc_2.out      -> filt_bright.in
+LNK env_1.out      -> filt_bright.cutoff_mod
+LNK filt_bright.out -> amp_2.in
+LNK amp_2.out      -> out_main.in
+
+# A deliberate port-shape mismatch to verify the warning path.
+# `osc_1.out` is a signal; `env_1.trigger` is an event. Signal-to-event
+# is nonsense (continuous data cannot fire a discrete trigger). The
+# expander should warn and still record the LNK.
+LNK osc_1.out -> env_1.trigger
+
+# ----------------------------------------------------------------------
+# A GRP grouping the patch nodes together. Patches are non-time-
+# positioned (dialect template §1.6), so `dur` is meaningless here.
+# The GRP exists purely as a reachability scope.
+# ----------------------------------------------------------------------
+
+GRP all_voices {
+  USE osc_1
+  USE env_1
+  USE filt_1
+  USE amp_1
+  USE out_main
+  USE lead_line
+  USE osc_2
+  USE filt_bright
+  USE amp_2
+}
+
+# An unreachable patch node to test reachability pruning.
+DEF orphan_lfo : patch.oscillator {
+  waveform = sine
+  freq     = 5.0
+}
+
+# Demo root.
+GRP demo_root {
+  USE all_voices
+}

@@ -1,0 +1,56 @@
+# patch graph: 8 nodes, 10 edges
+# warnings: 1
+# WARN  osc_1.out -> env_1.trigger: port shape mismatch: signal -> event
+
+# topological order:
+#   osc_1
+#   env_1
+#   filt_1
+#   amp_1
+#   osc_2
+#   filt_bright
+#   amp_2
+#   out_main
+
+node osc_1 : patch.oscillator
+    freq = 220.0
+    waveform = 'sawtooth'
+
+node env_1 : patch.envelope
+    attack = 0.01
+    decay = 0.2
+    release = 0.4
+    sustain = 0.7
+
+node filt_1 : patch.filter
+    cutoff = 1200.0
+    q = 0.7
+    type = 'lowpass'
+
+node amp_1 : patch.gain
+    gain = 0.8
+
+node osc_2 : patch.oscillator
+    freq = 440.0
+    waveform = 'sawtooth'
+
+node filt_bright : patch.filter
+    cutoff = 2400.0
+    q = 0.7
+    type = 'lowpass'
+
+node amp_2 : patch.gain
+    gain = 0.5
+
+node out_main : patch.output
+
+edge amp_1.out -> out_main.in  [signal -> signal]
+edge amp_2.out -> out_main.in  [signal -> signal]
+edge env_1.out -> filt_1.cutoff_mod  [value -> value]
+edge env_1.out -> filt_bright.cutoff_mod  [value -> value]
+edge filt_1.out -> amp_1.in  [signal -> signal]
+edge filt_bright.out -> amp_2.in  [signal -> signal]
+edge lead_line.note_on -> env_1.trigger  [event -> event]
+edge osc_1.out -> env_1.trigger  [signal -> event]  WARNING: port shape mismatch: signal -> event
+edge osc_1.out -> filt_1.in  [signal -> signal]
+edge osc_2.out -> filt_bright.in  [signal -> signal]

@@ -1,0 +1,54 @@
+# phrase_motif_flat.spine
+#
+# The same demo as phrase_motif.spine, hand-written without any
+# structural reuse. Every note explicitly defined and placed.
+#
+# Existence justification: makes the byte-count comparison real. The
+# rolled-up version uses DEF/MOD/USE to express the same musical
+# content; this version uses none of that. Both files must expand to
+# byte-identical event lists. If structural compression is doing
+# useful work, this file is meaningfully larger.
+#
+# Both files are compared after canonical comment-and-whitespace
+# removal (see SIZE_COMPARISON.md).
+
+# Notes used in the four motif statements. Note ids are suffixed
+# because v0.2 doesn't yet allow multiple DEFs of the same id even if
+# their contents are identical, and the flat form must invent fresh
+# ones for each instance to keep the file truly flat.
+DEF n_C4_a : music.note { pitch=C4 }
+DEF n_E4_a : music.note { pitch=E4 }
+DEF n_G4_a : music.note { pitch=G4 }
+DEF n_G4_b : music.note { pitch=G4 }
+DEF n_B4   : music.note { pitch=B4 }
+DEF n_D5   : music.note { pitch=D5 }
+DEF n_C5   : music.note { pitch=C5 }
+DEF n_E5   : music.note { pitch=E5 }
+DEF n_G5   : music.note { pitch=G5 }
+DEF n_C4_b : music.note { pitch=C4 }
+DEF n_G4_c : music.note { pitch=G4 }
+DEF n_C4_c : music.note { pitch=C4 }
+DEF n_E4_b : music.note { pitch=E4 }
+DEF n_G4_d : music.note { pitch=G4 }
+DEF r_13   : music.rest
+
+DEF cello_main : music.instrument { timbre=warm }
+LNK n_C4_a.out -> cello_main.in
+
+GRP demo_root {
+  USE n_C4_a at 0.0  dur 1.0
+  USE n_E4_a at 1.0  dur 1.0
+  USE n_G4_a at 2.0  dur 1.0
+  USE n_G4_b at 4.0  dur 1.0
+  USE n_B4   at 5.0  dur 1.0
+  USE n_D5   at 6.0  dur 1.0
+  USE n_C5   at 8.0  dur 0.5
+  USE n_E5   at 8.5  dur 0.5
+  USE n_G5   at 9.0  dur 0.5
+  USE n_C4_b at 12.0 dur 1.0
+  USE r_13   at 13.0 dur 1.0
+  USE n_G4_c at 14.0 dur 1.0
+  USE n_C4_c at 16.0 dur 1.0
+  USE n_E4_b at 17.0 dur 1.0
+  USE n_G4_d at 18.0 dur 1.0
+}

@@ -1,0 +1,15 @@
+t=  0.0000  note  pitch=C4    dur=1.0000  vel=1.000
+t=  1.0000  note  pitch=E4    dur=1.0000  vel=1.000
+t=  2.0000  note  pitch=G4    dur=1.0000  vel=1.000
+t=  4.0000  note  pitch=G4    dur=1.0000  vel=1.000
+t=  5.0000  note  pitch=B4    dur=1.0000  vel=1.000
+t=  6.0000  note  pitch=D5    dur=1.0000  vel=1.000
+t=  8.0000  note  pitch=C5    dur=0.5000  vel=1.000
+t=  8.5000  note  pitch=E5    dur=0.5000  vel=1.000
+t=  9.0000  note  pitch=G5    dur=0.5000  vel=1.000
+t= 12.0000  note  pitch=C4    dur=1.0000  vel=1.000
+t= 13.0000  rest                  dur=1.0000
+t= 14.0000  note  pitch=G4    dur=1.0000  vel=1.000
+t= 16.0000  note  pitch=C4    dur=1.0000  vel=1.000
+t= 17.0000  note  pitch=E4    dur=1.0000  vel=1.000
+t= 18.0000  note  pitch=G4    dur=1.0000  vel=1.000
