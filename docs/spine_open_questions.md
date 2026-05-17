@@ -1,6 +1,6 @@
 # SPINE Open Questions
 
-**Companion to:** `spine_core_v0_2_design.md`
+**Companion to:** `spine_core_v0_3_design.md`
 Project: Epsilon Null Operation (ε₀)
 Status: living document — append as new questions arise
 
@@ -282,13 +282,12 @@ needed.
 
 ### 5.2 Curves as first-class values
 
-**Question:** Is "a curve" a value type, or always a reference to a
-curve entity?
+**~~Open~~ RESOLVED in v0.3** (`spine_core_v0_3_design.md` §4.4).
 
-**Deferred because:** References are sufficient. Inline curves would
-duplicate.
-
-**Current lean:** Always a reference. Curves are entities.
+**Resolution:** A curve is a value type, accepting two surface forms:
+canonical `ref(curve_entity)` and verb sugar
+(`rise 0.0 0.7`, `decelerando 0.7`). Both desugar to entity
+references at parse time. Inline curve points are still deferred.
 
 ### 5.3 Blobs
 
@@ -336,19 +335,34 @@ resolution time. Detailed type compatibility is the dialect's problem.
 
 ### 7.1 Seed model
 
-**Question:** How are random seeds inherited through groups, MODs,
-and instance ids?
+**~~Open~~ RESOLVED in v0.3** (`spine_core_v0_3_design.md` §4.5).
 
-**Deferred because:** No prototype uses RNG yet.
+**Resolution:** three-level inheritance.
 
-**Force a decision when:** First procedurally-varied entity (e.g. a
-slightly-different walk cycle per actor) appears.
+1. **Score-level** — a `seed N` attribute on a GRP. Sets the root
+   seed for all reachable descendants.
+2. **MOD-derivation-level** — explicit `seed N` in a humanize MOD.
+   Overrides inherited score-level seed for that named variant and
+   anything derived from it.
+3. **USE-level** — explicit `seed=N` USE override. Affects this
+   instance only.
 
-**Current lean:** Every USE has an implicit seed derived from
-(parent_seed, entity_id, instance_counter). Override with explicit
-`seed=N` when reproducibility matters. Roll-up must respect seed
-identity — two USEs with different effective seeds are not the same
-USE.
+Effective seeds are derived by hashing
+`(inherited_seed, entity_id, instance_counter)`. Resolution is
+**offline**: the build tool walks every humanize-bearing entity and
+embeds the resolved seed in the binary form. The runtime never walks
+the GRP stack at humanize evaluation time.
+
+**Constraint on roll-up:** the roll-up tool may NOT merge two USEs
+with different effective seeds, even if their surface MOD chain is
+identical. Two notes both written `gesture=vib_swell_h` produce
+different jitter because their instance counters differ; this is
+audible content, not implementation detail.
+
+Implementation status: Prototype D records each humanize-bearing
+entity's seed-derivation tuple `(parent_seed, entity_id,
+instance_counter)`. Real hashing to a final seed integer is
+scheduled for the first audio-producing prototype.
 
 ### 7.2 Probabilistic operators
 

@@ -1,8 +1,8 @@
 # SPINE Dialect Template
 
-**Companion to:** `spine_core_v0_2_design.md`
+**Companion to:** `spine_core_v0_3_design.md`
 Project: Epsilon Null Operation (ε₀)
-Status: v0.2 — empty template + one worked example (`music`)
+Status: v0.3 — empty template + worked examples (`music`, `cello` sketch)
 
 ---
 
@@ -70,7 +70,15 @@ If a type has no ports, say so explicitly.
 For each MOD operator this dialect supports, list:
 
 - **Operator name**
-- **Argument shape:** e.g. `+N`, `vector`, `bool`
+- **Arity:** how many tokens after the operator name belong to it
+  (default 1; v0.3 supports mixed)
+- **Argument shape:** e.g. `+N` (signed int), `vector`, `bool`,
+  `<key> <value>` (the patch dialect's `set`), `<curve>` (a curve
+  value)
+- **Verb forms** (if the operator accepts curve sugar): the verb names
+  and what each maps to, e.g. `rise <a> <b>` → linear ramp from a to
+  b; `fall <a> <b>` → linear ramp down; `decelerando <factor>` →
+  named curve from the dialect's curve library
 - **Applies to which types**
 - **Effect**
 - **Composes with:** which other operators it stacks cleanly with
@@ -125,7 +133,26 @@ Lifetime affects how a runtime schedules the entity (deferred to the
 runtime model document), how the simulator ticks it, and how
 reachability handles its teardown when a GRP exits (open).
 
-### 1.8 Interpreter notes
+### 1.8 Transition table (optional)
+
+For dialects with gesture transitions (cello, motion, etc.), declare
+how (from_gesture, to_gesture) pairs resolve. The `transition_from=`
+USE override (SPINE core §3.2) carries the marker; this table tells
+the dialect's resolver what to do with it.
+
+A transition table entry typically declares:
+
+- **from_gesture** — type id pattern (may use wildcards within domain)
+- **to_gesture** — same
+- **resolver** — symbolic name of the handoff procedure
+  (`continue_bow`, `lift_then_attack`, `crossfade_over_N_ticks`)
+- **runtime_state_needed** — bool. If true, the resolver requires
+  inspecting the previous gesture's live state and cannot be fully
+  resolved offline. See `spine_runtime_model.md` §9.6.
+
+Most dialects do not have transitions and skip this section.
+
+### 1.9 Interpreter notes
 
 - **Implementation:** language, location in repo.
 - **Output:** what the interpreter produces (events, samples, frames,
@@ -133,7 +160,7 @@ reachability handles its teardown when a GRP exits (open).
 - **Dependencies on other dialects:** if any.
 - **Known limitations / TODO.**
 
-### 1.9 Open questions
+### 1.10 Open questions
 
 Dialect-specific open questions, separate from the global ones in
 `spine_open_questions.md`.
@@ -288,17 +315,248 @@ Effect:   Multiplies velocity on emitted events. Instance-only; not a
 
 ---
 
-## 3. Future dialects (placeholders)
+## 3. Worked example: the `cello` dialect (v0.3 sketch)
+
+The cello dialect is the v0.3 worked example for gesture composition,
+seed inheritance, sparse continuous modifiers, and gesture transitions.
+It is deliberately a **sketch**: enough types and operators to write
+two example phrases (one legato, one martélé→legato) and exercise all
+the v0.3 design surface, but not a complete instrument. The real
+instrument-side specification (synthesis math, gesture trajectory
+templates in the wavelet basis, operator-matrix recipes) lives in a
+separate cello-dialect chat.
+
+### 3.1 Domain
+
+- **Domain name:** `cello`
+- **Purpose:** Gesture-level notation for cello performance. The score
+  notates *which gesture, when, on what pitch, with what sparse
+  deviations*. Trajectory templates, synthesis, and the wavelet basis
+  live instrument-side and are out of scope here.
+- **Status:** Draft v0.3 sketch. Real specification lives elsewhere.
+
+### 3.2 Type ids
+
+```text
+Type id:    cello.gesture.détaché
+            cello.gesture.martelé
+            cello.gesture.legato
+            cello.gesture.vibrato_warm
+            cello.gesture.vibrato_narrow
+            cello.gesture.sul_tasto
+            cello.gesture.pizzicato
+
+Required:   (none — gestures are atomic; defaults come from the
+            instrument-side trajectory template)
+
+Optional:   None at this level. Variants are produced via MOD.
+
+Notes:      Each gesture references an instrument-side trajectory
+            template (bow_force, bow_velocity, contact_point,
+            vibrato_rate, vibrato_depth, finger_pressure, ...). The
+            score never sees the trajectory; it just names the gesture.
+
+Type id:    cello.note
+Required:   pitch: symbol      (scientific notation)
+            gesture: reference (to a cello.gesture.* entity)
+Optional:   transition_from: reference (to the previous gesture)
+            duration: float (local-time units; comes from USE `dur`)
+Notes:      Represents one bow stroke / one performance event with a
+            named gesture. Distinct from music.note because it carries
+            a gesture binding.
+
+Type id:    cello.curve.standard
+Required:   shape: symbol (rise, fall, hold, swell_then_settle, ...)
+            args: vector of floats
+Notes:      Standard library curve referenced via ref() for sparse
+            modifier values. Instrument-side maps shape+args to actual
+            wavelet-basis coefficients.
+```
+
+### 3.3 Ports
+
+Gestures and notes have no SPINE-visible ports in v0.3. Connection
+between music events and the cello instrument happens at the
+`audio.instrument.cello` level (audio dialect), not here. Curves are
+value-shape outputs only when referenced as modifier values.
+
+```text
+cello.gesture.*:        Inputs: (none)   Outputs: (none in v0.3)
+cello.note:             Inputs: (none)   Outputs: out (event)
+cello.curve.standard:   Inputs: (none)   Outputs: out (value, curve-shaped)
+```
+
+### 3.4 Operators
+
+```text
+Operator:  with_pressure   Arity: 2 (verb + arg pair)
+Args:      Verb form: `rise <a> <b>`, `fall <a> <b>`, `hold <v>`
+           Reference form: `ref(<curve_entity>)`
+Applies:   cello.gesture.*
+Effect:    Attaches a bow_pressure curve to the gesture's trajectory.
+Composes:  with most other gesture operators independently.
+
+Operator:  with_depth      Arity: 2 (verb + arg pair)
+Args:      Verb form: `rise <a> <b>`, `fall <a> <b>`,
+                      `grow <a> <b>`
+           Reference form: `ref(<curve_entity>)`
+Applies:   cello.gesture.vibrato_*
+Effect:    Attaches a vibrato_depth curve.
+Composes:  with decelerando, humanize.
+
+Operator:  decelerando     Arity: 1
+Args:      float in [0.0, 1.0] — final-tempo ratio
+Applies:   cello.gesture.vibrato_*
+Effect:    Slows vibrato rate toward the end of the gesture.
+Composes:  with with_depth, humanize.
+
+Operator:  accelerando     Arity: 1
+Args:      float — final-tempo ratio (typically > 1.0)
+Applies:   cello.gesture.vibrato_*
+Effect:    Speeds vibrato rate toward the end.
+Composes:  with with_depth, humanize.
+
+Operator:  slur_from_prev  Arity: 0
+Args:      (none — flag-style)
+Applies:   cello.gesture.legato, cello.gesture.détaché
+Effect:    Marks the gesture as bow-continuous from the previous note.
+           Instrument-side renders no re-articulation.
+Composes:  with with_pressure, humanize.
+
+Operator:  with_attack     Arity: 2 (verb + arg pair)
+Args:      Verb form: `sharper <degree>`, `softer <degree>`
+Applies:   cello.gesture.martelé, cello.gesture.détaché
+Effect:    Modifies the attack transient shape.
+Composes:  with with_pressure, humanize.
+
+Operator:  humanize        Arity: 1 or 2
+Args:      float (jitter amount, ~0.0-0.1)
+           Optional: `seed <int>` follows the float for explicit seed.
+Applies:   any cello.gesture.*
+Effect:    Adds seeded jitter to all trajectory parameters. Without
+           explicit seed, derives from inherited GRP seed.
+Composes:  with everything (typically last in the chain).
+```
+
+### 3.5 Override keys
+
+```text
+Override:  gesture
+Args:      reference (to a cello.gesture.* entity, possibly MOD-derived)
+Applies:   cello.note USE
+Effect:    Binds this note to a specific gesture variant.
+
+Override:  transition_from
+Args:      reference (to the previous note's gesture variant)
+Applies:   cello.note USE
+Effect:    Marks an explicit gesture handoff. Instrument resolves via
+           the transition table in §3.8.
+
+Override:  seed
+Args:      int
+Applies:   any USE of a humanize-bearing entity
+Effect:    Overrides inherited seed for this USE only.
+```
+
+### 3.6 Time interpretation
+
+- **Time-positioned types:** `cello.note`, GRPs containing cello.notes.
+- **Non-time-positioned types:** `cello.gesture.*`, `cello.curve.*` —
+  these are definitions, not events.
+- **Positioning mode:** sequential (same as music dialect; notes follow
+  the previous note's end unless explicit `at` is given).
+- **Stretching behavior:** when a USE's `dur` differs from local
+  duration, all note timings scale linearly. Gesture trajectory shapes
+  rescale too (a vibrato that "rises over first half" rises over the
+  scaled first half).
+- **Default local duration:** sum of note durations in sequential mode.
+
+### 3.7 Lifetime
+
+- `cello.gesture.*` — **precomputed.** Trajectory templates load once
+  at build time. Score variants (MOD chains) also resolve at build
+  time, except for the humanize-rolled portion (resolved offline per
+  seed §4.5 of the main design doc).
+- `cello.note` — **event-driven.** Emits one performance event when
+  scheduled; the event carries the gesture binding.
+- `cello.curve.standard` — **precomputed.** Standard-library curve
+  shapes are deterministic.
+
+### 3.8 Transition table
+
+```text
+from_gesture                      to_gesture            resolver
+cello.gesture.legato              cello.gesture.legato  continue_bow
+cello.gesture.détaché             cello.gesture.legato  continue_bow
+cello.gesture.legato              cello.gesture.détaché continue_bow
+
+cello.gesture.martelé             cello.gesture.legato  lift_and_settle
+cello.gesture.martelé             cello.gesture.détaché lift_and_settle
+
+cello.gesture.legato              cello.gesture.martelé reattack
+cello.gesture.détaché             cello.gesture.martelé reattack
+
+cello.gesture.*                   cello.gesture.pizzicato pluck_attack
+cello.gesture.pizzicato           cello.gesture.*       bow_recover
+
+(default)                         (any)                 brief_silence
+```
+
+Most transitions can resolve offline. `lift_and_settle` after a
+humanized martélé needs to know the bow's perturbed position at the
+moment of release; that resolver flag's runtime_state_needed = true.
+See `spine_runtime_model.md` §9.6.
+
+### 3.9 Interpreter notes
+
+- **Implementation:** Python sketch in `tools/spine/src/expand.py`
+  (Prototype D). Validates parse, resolves MOD chains, captures
+  transition markers, propagates seeds through reachability.
+- **Output:** A *resolved phrase dump* — flat per-note records with
+  resolved gesture variant id, transition_from id, effective seed
+  (stubbed in v0.3), and any sparse-curve references.
+- **No audio.** Synthesis is out of scope; that work lives in the
+  cello-dialect chat plus eventual softsynth.
+- **Dependencies:** none in Prototype D. Eventually `audio` dialect
+  for instrument-level integration.
+- **Known limitations:**
+  - Effective seed values are recorded as `(parent_seed, entity_id,
+    instance_counter)` tuples rather than hashed integers. Real
+    hashing is scheduled for the first audio-producing prototype.
+  - Verb-form curve resolution is a stub: the dialect records what
+    curve verb+args was used, but does not yet materialize the
+    wavelet coefficients.
+  - Transition table is a static lookup; no contextual logic.
+
+### 3.10 Open questions
+
+1. Should `legato` be a base gesture or a transformation? Currently
+   listed as a base; in some performance contexts it's clearer as
+   `détaché slur_from_prev`. Possibly redundant.
+2. How should chord notation work? Two notes USE'd simultaneously?
+   A `cello.chord` type? Deferred until first multi-stop phrase.
+3. Where do bowings (down-bow / up-bow) live? Probably as a
+   transformation operator (`down_bow`, `up_bow`), but real cellists
+   may want explicit notation. Deferred.
+4. How does `decelerando` compose with `accelerando`? Currently
+   left-to-right last-wins; might want a different policy. Open.
+5. The transition table grows combinatorially with gesture count.
+   At what size does it need a different representation (default rules
+   + exceptions)?
+
+---
+
+## 4. Future dialects (placeholders)
 
 Listed here so the namespace is reserved and so future-you remembers
 which corners of the design are claimed:
 
 - **`audio`** — instruments, resonators, exciters, effects, signal flow.
-  Consumes events from `music`.
+  Consumes events from `music` and `cello`.
 - **`wavelet`** — coefficient-space envelopes, splines, fields, IRs.
-  Provides control signals to `audio` and `motion`.
-- **`patch`** — generic node/port/connection patchbays. May subsume
-  parts of `audio` once it stabilizes.
+  Provides control signals to `audio`, `cello`, and `motion`.
+- **`patch`** — generic node/port/connection patchbays (already exists,
+  used in Prototypes B and C).
 - **`graphics`** — shaders, geometry atoms, cameras, render events.
 - **`motion`** — gait, gesture, cloth, body motion motifs.
 - **`text`** — UTF-8 strings, layout, glyph masks, text-as-visual.
@@ -309,7 +567,7 @@ Each will get its own filled template before its first prototype.
 
 ---
 
-## 4. The dialect interpreter contract
+## 5. The dialect interpreter contract
 
 Every dialect interpreter, regardless of language, presents the same
 shape to SPINE core:
@@ -335,7 +593,7 @@ A this is moot — only `music` exists.
 
 ---
 
-## 5. One-page reminder
+## 6. One-page reminder
 
 A dialect declares:
 

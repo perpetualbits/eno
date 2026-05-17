@@ -1,5 +1,13 @@
 # SPINE Core v0.2
 
+**STATUS: SUPERSEDED by `spine_core_v0_3_design.md`.**
+
+This document is kept for historical reference. v0.3 is strictly
+additive: every concept here remains valid, but the canonical
+specification is now v0.3. Read v0.3 for current work.
+
+---
+
 **Working design document**
 Project: Epsilon Null Operation (ε₀)
 Status: v0.2 draft — supersedes v0.1 and its appendix

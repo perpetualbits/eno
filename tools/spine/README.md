@@ -8,24 +8,26 @@ worked examples, and tests.
 
 ## Status
 
-| Prototype | What                                              | Status |
-|-----------|---------------------------------------------------|--------|
-| A         | Music dialect, structural compression             | done   |
-| B         | Patch dialect, LNK graph resolution               | done   |
-| C         | Streaming patches, feedback loops, simulator      | done   |
-| D         | TBD                                               | not started |
+| Prototype | What                                                | Status |
+|-----------|-----------------------------------------------------|--------|
+| A         | Music dialect, structural compression               | done   |
+| B         | Patch dialect, LNK graph resolution                 | done   |
+| C         | Streaming patches, feedback loops, simulator        | done   |
+| D         | Cello dialect sketch, gesture composition, seeds    | done   |
+| E         | TBD                                                 | not started |
 
 ## Layout
 
 ```
 tools/spine/
 ├── src/
-│   ├── expand.py             # offline parser + expander, both dialects
+│   ├── expand.py             # parser + resolvers (music, patch, cello)
 │   └── simulate.py           # tick-based simulator for streaming patches
 ├── tests/
 │   ├── test_prototype_a.py   # music dialect smoke test (4 checks)
 │   ├── test_prototype_b.py   # patch dialect smoke test (7 checks)
-│   └── test_prototype_c.py   # streaming + simulator smoke test (8 checks)
+│   ├── test_prototype_c.py   # streaming + simulator smoke test (8 checks)
+│   └── test_prototype_d.py   # cello dialect smoke test (10 checks)
 ├── examples/
 │   ├── phrase_motif.spine                 # rolled-up music score
 │   ├── phrase_motif_flat.spine            # hand-flat equivalent
@@ -37,10 +39,13 @@ tools/spine/
 │   ├── bladerunner_sketch.graph.txt       # reference resolved graph
 │   ├── bladerunner_sketch.summary.txt     # reference simulation summary
 │   ├── bladerunner_sketch.trace.csv       # reference simulation CSV
-│   └── bladerunner_sketch.trace.txt       # reference simulation trace
+│   ├── bladerunner_sketch.trace.txt       # reference simulation trace
+│   ├── cello_phrases.spine                # two cello phrases (v0.3)
+│   └── cello_phrases.resolved.txt         # reference resolution dump
 └── docs/
     ├── PROTOTYPE_B.md                     # patch dialect notes
-    └── PROTOTYPE_C.md                     # streaming + simulator notes
+    ├── PROTOTYPE_C.md                     # streaming + simulator notes
+    └── PROTOTYPE_D.md                     # cello + v0.3 notes
 ```
 
 ## Quick start
@@ -59,6 +64,9 @@ python3 src/expand.py examples/synth_voice.spine
 
 # Simulate the streaming Bladerunner sketch:
 python3 src/simulate.py examples/bladerunner_sketch.spine --summary-only
+
+# Resolve cello phrases (v0.3):
+python3 src/expand.py examples/cello_phrases.spine
 
 # Reachability of any of them:
 python3 src/expand.py examples/synth_voice.spine --dump-reachable

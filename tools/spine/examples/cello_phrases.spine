@@ -1,0 +1,187 @@
+# cello_phrases.spine
+#
+# Prototype D example for SPINE v0.3.
+#
+# Two short cello phrases sketched in the v0.3 cello dialect:
+#
+#   1. opening_arc      — three notes, legato, with a swell on the
+#                         last (rising bow pressure mid-note)
+#   2. answering_arc    — three notes, vibrato-warm, depth swelling
+#                         then settling; second note decelerando
+#
+#   3. insistent_figure — four martélé notes with crescendo
+#   4. ending           — last note transitions from martélé to legato
+#
+# What this exercises that prior prototypes did not:
+#   - Composable gesture MOD chains (multiple operators stacked)
+#   - Sparse curve modifiers in BOTH verb form and ref form
+#   - GRP seed= attribute for phrase-level humanization
+#   - transition_from= USE override at gesture boundaries
+#   - Per-MOD seed override (one phrase) and inherited seed (another)
+#   - Reachability still drops unused gesture variants
+#
+# Audio: NOT GENERATED. This is design validation only. The resolver
+# produces a per-note dump showing what a synthesizer would receive.
+
+# ----------------------------------------------------------------------
+# Curve library — referenced by gesture MODs that use ref() form.
+# In a real cello dialect these would map to wavelet-basis coefficients;
+# Prototype D treats them as opaque named entities.
+# ----------------------------------------------------------------------
+
+DEF swell_then_settle : cello.curve.standard {
+  shape = swell_settle
+  args  = [0.0, 0.7, 0.3]
+}
+
+DEF fall_smooth : cello.curve.standard {
+  shape = fall_smooth
+  args  = [0.7, 0.3]
+}
+
+# ----------------------------------------------------------------------
+# Base gestures are declared instrument-side. The score does not DEF
+# new base gestures; it only references them. We expose them here as
+# DEF stubs so the expander has something to walk to.
+# ----------------------------------------------------------------------
+
+DEF base_détaché      : cello.gesture.détaché
+DEF base_martelé      : cello.gesture.martelé
+DEF base_legato       : cello.gesture.legato
+DEF base_vibrato_warm : cello.gesture.vibrato_warm
+
+# An unreachable base gesture, to verify reachability pruning still
+# works for the cello dialect.
+DEF base_sul_tasto : cello.gesture.sul_tasto
+
+# ----------------------------------------------------------------------
+# Score-derived gesture variants — Phrase 1 (legato + vibrato)
+# ----------------------------------------------------------------------
+
+# Legato with a slur from the previous note (the second and third notes
+# of the opening arc continue the bow from the first).
+MOD legato_arc      = base_détaché slur_from_prev
+
+# The third note adds a rising pressure curve. Verb form.
+MOD legato_swell    = legato_arc with_pressure rise 0.0 0.3
+
+# Vibrato with a swelling-then-settling depth curve. Ref form, since
+# this depth shape is reusable.
+MOD vib_swell       = base_vibrato_warm with_depth ref(swell_then_settle)
+
+# Vibrato that decelerates and fades. Stacks three operators across
+# two lines using `\` continuation.
+MOD vib_decel       = base_vibrato_warm decelerando 0.7 \
+                                        with_depth ref(fall_smooth)
+
+# Vibrato that just fades the depth without slowing. Verb form for
+# falloff; humanize is added per-phrase below.
+MOD vib_fade        = base_vibrato_warm with_depth fall 0.3 0.0
+
+# Humanized versions for the answering arc. Phrase-level seed will
+# inherit from the GRP seed= attribute below; we don't write seed
+# explicitly here. Each MOD just adds the humanize op.
+MOD vib_swell_h     = vib_swell humanize 0.05
+MOD vib_decel_h     = vib_decel humanize 0.05
+MOD vib_fade_h      = vib_fade  humanize 0.05
+
+# ----------------------------------------------------------------------
+# Score-derived gesture variants — Phrase 2 (martélé crescendo + return)
+# ----------------------------------------------------------------------
+
+# Four levels of martélé dynamics. The crescendo is expressed as four
+# named variants for v0.3; v0.4 may introduce a `crescendo over N`
+# family operator (open question §4.4 in the design doc).
+MOD m_quiet    = base_martelé with_bow_pressure hold 0.40
+MOD m_medium   = base_martelé with_bow_pressure hold 0.55
+MOD m_loud     = base_martelé with_bow_pressure hold 0.70
+MOD m_loudest  = base_martelé with_bow_pressure hold 0.85 with_attack sharper 0.2
+
+# Aftermath: legato that takes over from the martélé, with falling
+# pressure and growing vibrato depth.
+MOD legato_aftermath = base_détaché with_pressure fall 0.7 0.1 with_depth grow 0.0 0.3
+
+# Humanized versions for the insistent figure. Explicit MOD-level seed
+# this time — demonstrates the per-MOD override even when a GRP seed
+# is also in scope.
+MOD m_quiet_h    = m_quiet    humanize 0.04 seed 2718
+MOD m_medium_h   = m_medium   humanize 0.04 seed 2718
+MOD m_loud_h     = m_loud     humanize 0.04 seed 2718
+MOD m_loudest_h  = m_loudest  humanize 0.04 seed 2718
+MOD legato_h     = legato_aftermath humanize 0.05 seed 2718
+
+# ----------------------------------------------------------------------
+# Note definitions. cello.note carries pitch + gesture binding.
+# These are reusable templates; USEs supply timing.
+# ----------------------------------------------------------------------
+
+DEF note_A3_arc1   : cello.note { pitch=A3  gesture=ref(base_détaché) }
+DEF note_C4_arc1   : cello.note { pitch=C4  gesture=ref(legato_arc) }
+DEF note_D4_arc1   : cello.note { pitch=D4  gesture=ref(legato_swell) }
+
+DEF note_D4_arc2   : cello.note { pitch=D4  gesture=ref(vib_swell_h) }
+DEF note_Bb3_arc2  : cello.note { pitch=Bb3 gesture=ref(vib_decel_h) }
+DEF note_A3_arc2   : cello.note { pitch=A3  gesture=ref(vib_fade_h) }
+
+DEF note_G3_p2a    : cello.note { pitch=G3  gesture=ref(m_quiet_h) }
+DEF note_G3_p2b    : cello.note { pitch=G3  gesture=ref(m_medium_h) }
+DEF note_Bb3_p2    : cello.note { pitch=Bb3 gesture=ref(m_loud_h) }
+DEF note_D4_p2     : cello.note { pitch=D4  gesture=ref(m_loudest_h) }
+DEF note_D4_end    : cello.note { pitch=D4  gesture=ref(legato_h) }
+
+# ----------------------------------------------------------------------
+# Phrases as GRPs. Sequential timing — no explicit `at`, so each note
+# starts where the previous one ended.
+# ----------------------------------------------------------------------
+
+GRP opening_arc {
+  USE note_A3_arc1 dur 1.5
+  USE note_C4_arc1 dur 0.5
+  USE note_D4_arc1 dur 2.0
+}
+
+GRP answering_arc {
+  USE note_D4_arc2  dur 2.0
+  USE note_Bb3_arc2 dur 1.5
+  USE note_A3_arc2  dur 2.5
+}
+
+GRP insistent_figure {
+  USE note_G3_p2a dur 0.5
+  USE note_G3_p2b dur 0.5
+  USE note_Bb3_p2 dur 0.5
+  USE note_D4_p2  dur 0.5
+}
+
+# The transition phrase — the last martélé note is followed by a
+# legato note that explicitly marks the transition. The cello dialect's
+# transition table maps (martelé -> légato) to `lift_and_settle`, which
+# is flagged as runtime_state_needed.
+GRP transition_to_calm {
+  USE note_D4_end dur 2.0 { transition_from=ref(m_loudest_h) }
+}
+
+# ----------------------------------------------------------------------
+# Scene with GRP seed. Both phrases inside inherit seed=1234 for any
+# humanize MOD that didn't carry an explicit seed.
+# ----------------------------------------------------------------------
+
+GRP scene_a seed 1234 {
+  USE opening_arc   at 0.0
+  USE answering_arc at 4.0
+}
+
+# Scene B has no seed=; its phrases use explicitly-seeded MODs.
+GRP scene_b {
+  USE insistent_figure   at 0.0
+  USE transition_to_calm at 2.0
+}
+
+# ----------------------------------------------------------------------
+# Demo root.
+# ----------------------------------------------------------------------
+
+GRP demo_root {
+  USE scene_a at 0.0
+  USE scene_b at 12.0
+}

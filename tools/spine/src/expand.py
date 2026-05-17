@@ -58,17 +58,29 @@ class Statement:
     lnk_src: str | None = None     # LNK source port
     lnk_dst: str | None = None     # LNK destination port
     children: list["Statement"] = field(default_factory=list)  # GRP contents
+    seed: int | None = None        # GRP seed attribute (v0.3)
 
 
 def strip_comments(text: str) -> str:
-    """Remove # comments and blank-out empty lines, preserving line numbers."""
+    """Remove # comments and process line continuations.
+
+    A backslash at end of line (after comment removal) means "join
+    with the next line." This lets long MOD chains span multiple
+    lines for readability:
+
+        MOD vib_decel = base_vibrato_warm decelerando 0.7 \\
+                                          with_depth ref(fall_smooth)
+    """
     out = []
     for line in text.splitlines():
         idx = line.find("#")
         if idx >= 0:
             line = line[:idx]
         out.append(line)
-    return "\n".join(out)
+    joined = "\n".join(out)
+    # Process backslash-newline continuations.
+    joined = re.sub(r"\\\s*\n\s*", " ", joined)
+    return joined
 
 
 # Token classes for the value lexer. Strings are kept simple; expressions
@@ -324,7 +336,12 @@ _RE_USE = re.compile(
 _RE_SET = re.compile(r"^SET\s+([\w#]+)\.(\w+)\s*=\s*(.+)$", re.DOTALL)
 _RE_MOD = re.compile(r"^MOD\s+(\w+)\s*=\s*(\w+)\s+(.+)$", re.DOTALL)
 _RE_LNK = re.compile(r"^LNK\s+([\w.#]+)\s*->\s*([\w.#]+)\s*$", re.DOTALL)
-_RE_GRP = re.compile(r"^GRP\s+(\w+)\s*(\{.*\})\s*$", re.DOTALL)
+_RE_GRP = re.compile(
+    r"^GRP\s+(\w+)"
+    r"(?:\s+seed\s+([+-]?\d+))?"
+    r"\s*(\{.*\})\s*$",
+    re.DOTALL,
+)
 
 
 def _parse_statement(s: str) -> Statement:
@@ -378,10 +395,13 @@ def _parse_statement(s: str) -> Statement:
         m = _RE_GRP.match(s)
         if not m:
             raise SyntaxError(f"bad GRP: {s!r}")
-        id_, block = m.groups()
+        id_, seed_str, block = m.groups()
         inner = block[1:-1]
         children, _ = _parse_block(inner, 0, len(inner))
-        return Statement(kind="GRP", id=id_, children=children)
+        seed_val = int(seed_str) if seed_str is not None else None
+        return Statement(
+            kind="GRP", id=id_, children=children, seed=seed_val,
+        )
 
     raise SyntaxError(f"unknown statement: {s!r}")
 
@@ -391,29 +411,90 @@ def _parse_statement(s: str) -> Statement:
 # delivered as the op's `arg`. Kept tiny and dialect-aware.
 _MOD_OP_ARITY: dict[str, int] = {
     "set": 2,    # set <key> <value>  (patch dialect)
+    # Arity-0 flag operators (cello dialect):
+    "slur_from_prev": 0,
+}
+
+# Operators that accept verb-form arguments (v0.3). The parser looks at
+# the token immediately after the operator name: if it's a registered
+# verb for this operator, consume verb + N args (where N is verb-defined).
+# Otherwise fall back to the operator's normal arity (default 1).
+#
+# Structure: operator_name -> { verb_name: verb_arity, ... }
+# The verb_arity counts arguments AFTER the verb token itself.
+_MOD_OP_VERBS: dict[str, dict[str, int]] = {
+    "with_pressure":     {"rise": 2, "fall": 2, "hold": 1},
+    "with_depth":        {"rise": 2, "fall": 2, "grow": 2, "hold": 1},
+    "with_attack":       {"sharper": 1, "softer": 1},
+    "with_bow_pressure": {"rise": 2, "fall": 2, "hold": 1},
+    # `humanize` may optionally take `seed <int>` after its float arg.
+    # Handled specially in the parser below since it's two arities.
 }
 
 
 def _parse_mod_ops(text: str) -> list[tuple[str, Any]]:
     """Parse the operator list of a MOD statement.
 
-    Each operator is `name arg`, except for operators listed in
-    `_MOD_OP_ARITY` which take more than one. Whitespace is the only
-    separator. For multi-arg ops, the arg field becomes a tuple of
-    parsed values.
+    For each operator we try, in order:
+      1. Verb-form: if the next token is a verb registered under this
+         operator, consume verb + verb_arity args. The op's arg becomes
+         a tuple `(verb_name, arg1, arg2, ...)`.
+      2. Multi-arg: if the operator is in `_MOD_OP_ARITY`, consume that
+         many args as a tuple.
+      3. Single-arg: consume one arg.
+
+    Special case for `humanize`: takes 1 float, optionally followed by
+    `seed <int>`. Encoded as a tuple `(amount,)` or `(amount, seed)`.
+
+    Whitespace is the only separator.
     """
     tokens = _split_pairs(text)
     ops: list[tuple[str, Any]] = []
     i = 0
     while i < len(tokens):
         name = tokens[i]
+        # Verb-form check.
+        verbs = _MOD_OP_VERBS.get(name)
+        if verbs and i + 1 < len(tokens) and tokens[i + 1] in verbs:
+            verb = tokens[i + 1]
+            verb_arity = verbs[verb]
+            if i + 1 + verb_arity >= len(tokens):
+                raise SyntaxError(
+                    f"MOD operator {name!r} verb {verb!r} "
+                    f"expects {verb_arity} argument(s)"
+                )
+            verb_args = tuple(
+                parse_value(tokens[i + 2 + k]) for k in range(verb_arity)
+            )
+            ops.append((name, (verb,) + verb_args))
+            i += 2 + verb_arity
+            continue
+
+        # humanize special case: 1 mandatory arg + optional "seed <int>"
+        if name == "humanize":
+            if i + 1 >= len(tokens):
+                raise SyntaxError("humanize requires an amount argument")
+            amount = parse_value(tokens[i + 1])
+            # Check for optional seed.
+            if (i + 3 < len(tokens) and tokens[i + 2] == "seed"):
+                seed_val = parse_value(tokens[i + 3])
+                ops.append(("humanize", (amount, seed_val)))
+                i += 4
+            else:
+                ops.append(("humanize", (amount,)))
+                i += 2
+            continue
+
+        # Multi-arg via arity table.
         arity = _MOD_OP_ARITY.get(name, 1)
-        if i + arity >= len(tokens):
+        if arity > 0 and i + arity >= len(tokens):
             raise SyntaxError(
                 f"MOD operator {name!r} expects {arity} argument(s)"
             )
-        if arity == 1:
-            arg: Any = parse_value(tokens[i + 1])
+        if arity == 0:
+            arg: Any = None
+        elif arity == 1:
+            arg = parse_value(tokens[i + 1])
         else:
             arg = tuple(parse_value(tokens[i + 1 + k]) for k in range(arity))
         ops.append((name, arg))
@@ -476,12 +557,40 @@ def reachable_from(
         s = table.get(cur)
         if s is None:
             continue
+
+        # Helper: walk a value, follow any `('ref', id)` it contains.
+        def follow_refs(value: Any) -> None:
+            if isinstance(value, tuple) and len(value) >= 2 and value[0] == "ref":
+                stack.append(value[1])
+            elif isinstance(value, list):
+                for v in value:
+                    follow_refs(v)
+
+        # MOD reaches its source and any ref()-valued op arguments.
         if s.kind == "MOD" and s.src_id:
             stack.append(s.src_id)
+        if s.kind == "MOD":
+            for _, arg in s.ops:
+                # arg may itself be a ref tuple, or a verb-form tuple
+                # whose elements may include nested ref tuples.
+                follow_refs(arg)
+                if isinstance(arg, tuple):
+                    for sub in arg:
+                        follow_refs(sub)
+
+        # DEF params may contain refs (e.g. cello.note's gesture=ref(...)).
+        if s.kind == "DEF":
+            for _, v in s.params.items():
+                follow_refs(v)
+
         if s.kind == "GRP":
             for child in s.children:
                 if child.kind == "USE" and child.id:
                     stack.append(child.id)
+                    # USE override values may reference other entities
+                    # (e.g. transition_from=ref(prev_gesture)).
+                    for _, v in child.params.items():
+                        follow_refs(v)
                 elif child.kind == "LNK":
                     for endpoint in (child.lnk_src, child.lnk_dst):
                         if endpoint:
@@ -980,14 +1089,100 @@ MUSIC_PORTS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Cello dialect — v0.3 sketch. See `spine_dialect_template.md` §3 for
+# the contract. Base gestures are precomputed (trajectory templates
+# load once); notes are event-driven (one performance event per USE).
+CELLO_PORTS: dict[str, dict[str, Any]] = {
+    "cello.gesture.détaché": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.gesture.martelé": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.gesture.legato": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.gesture.vibrato_warm": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.gesture.vibrato_narrow": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.gesture.sul_tasto": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.gesture.pizzicato": {
+        "inputs": {}, "outputs": {}, "lifetime": "precomputed",
+    },
+    "cello.note": {
+        "inputs": {},
+        "outputs": {"out": "event"},
+        "lifetime": "event-driven",
+    },
+    "cello.curve.standard": {
+        "inputs": {},
+        "outputs": {"out": "value"},
+        "lifetime": "precomputed",
+    },
+}
+
 # Union view used by the resolver.
-ALL_PORTS = {**PATCH_PORTS, **MUSIC_PORTS}
+ALL_PORTS = {**PATCH_PORTS, **MUSIC_PORTS, **CELLO_PORTS}
+
+
+# Cello-dialect base gestures. The score writer cannot DEF a new base
+# gesture; only MOD-derive variants of these. Used by the cello resolver
+# to detect "is this a known base gesture vs a MOD-derived variant."
+CELLO_BASE_GESTURES: set[str] = {
+    "cello.gesture.détaché",
+    "cello.gesture.martelé",
+    "cello.gesture.legato",
+    "cello.gesture.vibrato_warm",
+    "cello.gesture.vibrato_narrow",
+    "cello.gesture.sul_tasto",
+    "cello.gesture.pizzicato",
+}
+
+
+# Cello transition table — from-gesture base type, to-gesture base type,
+# resolver name. The matching is by base type (after walking MOD chains
+# to the root), and falls back to a default if no exact match found.
+# `runtime_state_needed` flags resolvers that may need live state of
+# the previous gesture (see runtime model §9.6).
+CELLO_TRANSITIONS: list[dict[str, Any]] = [
+    {"from": "cello.gesture.legato",   "to": "cello.gesture.legato",
+     "resolver": "continue_bow",       "runtime_state_needed": False},
+    {"from": "cello.gesture.détaché",  "to": "cello.gesture.legato",
+     "resolver": "continue_bow",       "runtime_state_needed": False},
+    {"from": "cello.gesture.legato",   "to": "cello.gesture.détaché",
+     "resolver": "continue_bow",       "runtime_state_needed": False},
+    {"from": "cello.gesture.martelé",  "to": "cello.gesture.legato",
+     "resolver": "lift_and_settle",    "runtime_state_needed": True},
+    {"from": "cello.gesture.martelé",  "to": "cello.gesture.détaché",
+     "resolver": "lift_and_settle",    "runtime_state_needed": True},
+    {"from": "cello.gesture.legato",   "to": "cello.gesture.martelé",
+     "resolver": "reattack",           "runtime_state_needed": False},
+    {"from": "cello.gesture.détaché",  "to": "cello.gesture.martelé",
+     "resolver": "reattack",           "runtime_state_needed": False},
+    {"from": "*",                       "to": "cello.gesture.pizzicato",
+     "resolver": "pluck_attack",       "runtime_state_needed": False},
+    {"from": "cello.gesture.pizzicato","to": "*",
+     "resolver": "bow_recover",        "runtime_state_needed": False},
+]
 
 
 def lifetime_of(type_id: str) -> str | None:
     """Lookup the runtime lifetime classification for a type id."""
     entry = ALL_PORTS.get(type_id)
     return entry.get("lifetime") if entry else None
+
+
+def is_cello_entity(type_id: str | None) -> bool:
+    return type_id is not None and type_id.startswith("cello.")
+
+
+def is_cello_gesture(type_id: str | None) -> bool:
+    return type_id is not None and type_id.startswith("cello.gesture.")
 
 
 @dataclass
@@ -1373,9 +1568,413 @@ def expand_patch(
 
 
 # =====================================================================
-# Dialect detection. Looks at reachable DEFs and decides which output
-# modes the document calls for.
+# Cello dialect resolver (Prototype D / v0.3 sketch).
+#
+# Walks reachable cello entities, resolves gesture MOD chains to (root
+# base gesture + transformation stack), propagates seed values through
+# GRP nesting, captures transition_from markers on note USEs, and emits
+# a per-note dump for diffable verification.
+#
+# This is not a synthesizer. The output is a stable text record of
+# WHAT a synthesizer would receive, not what it would sound like.
+# Synthesis lives in the cello-dialect chat plus eventual softsynth.
 # =====================================================================
+
+
+@dataclass
+class CelloGestureResolved:
+    """A gesture variant resolved to (base, ops). Mirrors a MOD chain."""
+    id: str                     # the entity's id (DEF or final MOD)
+    base: str                   # root base gesture type id
+    ops: list[tuple[str, Any]]  # accumulated transformation stack
+    humanize_amount: float | None = None
+    humanize_seed_explicit: int | None = None
+
+    def as_lines(self) -> list[str]:
+        lines = [f"gesture {self.id} base={self.base}"]
+        for op_name, op_arg in self.ops:
+            lines.append(f"    {op_name} {op_arg!r}")
+        if self.humanize_amount is not None:
+            seed_str = (
+                f"seed={self.humanize_seed_explicit}"
+                if self.humanize_seed_explicit is not None else "seed=inherited"
+            )
+            lines.append(f"    humanize {self.humanize_amount} {seed_str}")
+        return lines
+
+
+@dataclass
+class CelloNoteResolved:
+    """One performance event with resolved gesture binding."""
+    t: float                     # global time
+    pitch: str
+    dur: float
+    gesture_id: str | None       # which (possibly MOD-derived) gesture
+    transition_from: str | None  # the previous gesture id, if marked
+    transition_resolver: str | None  # looked up from CELLO_TRANSITIONS
+    transition_runtime_state: bool   # does the resolver need runtime state?
+    inherited_seed: int | None   # the score-level seed reached via GRP
+    seed_tuple: tuple[int, str, int] | None
+                                 # (parent_seed, gesture_id, instance_counter)
+                                 # for offline hashing; v0.3 records it as
+                                 # a tuple, doesn't yet hash
+
+    def as_line(self) -> str:
+        parts = [
+            f"t={self.t:>8.4f}",
+            f"pitch={self.pitch:<4}",
+            f"dur={self.dur:.4f}",
+            f"gesture={self.gesture_id or '(none)'}",
+        ]
+        if self.transition_from:
+            parts.append(
+                f"transition_from={self.transition_from} "
+                f"resolver={self.transition_resolver}"
+                f"{' (runtime_state)' if self.transition_runtime_state else ''}"
+            )
+        if self.seed_tuple:
+            parts.append(f"seed_tuple={self.seed_tuple}")
+        return "  ".join(parts)
+
+
+@dataclass
+class CelloResolution:
+    gestures: dict[str, CelloGestureResolved] = field(default_factory=dict)
+    notes: list[CelloNoteResolved] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+def resolve_cello_gesture_chain(
+    entity_id: str,
+    table: dict[str, Statement],
+) -> CelloGestureResolved | None:
+    """Walk a MOD chain back to a base cello.gesture.*; collect ops.
+
+    Returns None if the chain does not root at a cello base gesture.
+    """
+    chain: list[Statement] = []
+    cur = entity_id
+    while cur in table and table[cur].kind == "MOD":
+        chain.append(table[cur])
+        cur = table[cur].src_id
+        if cur is None:
+            return None
+    root = table.get(cur) if cur else None
+    if root is None or root.kind != "DEF" or not is_cello_gesture(root.type_id):
+        return None
+    base = root.type_id
+
+    # Collect ops oldest-first (root outward).
+    ops: list[tuple[str, Any]] = []
+    humanize_amount = None
+    humanize_seed_explicit = None
+    for mod_stmt in reversed(chain):
+        for op_name, op_arg in mod_stmt.ops:
+            if op_name == "humanize":
+                # humanize is recorded separately (it has special seed
+                # semantics) rather than as one of the transformation
+                # ops. (amount,) or (amount, seed) tuple.
+                if isinstance(op_arg, tuple):
+                    humanize_amount = float(op_arg[0])
+                    if len(op_arg) >= 2:
+                        humanize_seed_explicit = int(op_arg[1])
+                else:
+                    humanize_amount = float(op_arg)
+            else:
+                ops.append((op_name, op_arg))
+    return CelloGestureResolved(
+        id=entity_id, base=base, ops=ops,
+        humanize_amount=humanize_amount,
+        humanize_seed_explicit=humanize_seed_explicit,
+    )
+
+
+def lookup_cello_transition(
+    from_base: str | None,
+    to_base: str | None,
+) -> tuple[str, bool]:
+    """Return (resolver_name, runtime_state_needed) for a transition.
+
+    Falls back to ('brief_silence', False) if no rule matches.
+    """
+    if from_base is None or to_base is None:
+        return ("brief_silence", False)
+    for rule in CELLO_TRANSITIONS:
+        f_match = rule["from"] == "*" or rule["from"] == from_base
+        t_match = rule["to"] == "*" or rule["to"] == to_base
+        if f_match and t_match:
+            return (rule["resolver"], bool(rule["runtime_state_needed"]))
+    return ("brief_silence", False)
+
+
+def expand_cello(
+    stmts: list[Statement],
+    root: str = "demo_root",
+) -> CelloResolution:
+    """Resolve all reachable cello entities and produce a phrase dump."""
+    table = collect_top_level_ids(stmts)
+    if root not in table:
+        raise ValueError(f"root not found: {root}")
+    reachable = reachable_from(table, root, top_level=stmts)
+
+    res = CelloResolution()
+
+    # Resolve every reachable cello-gesture MOD chain.
+    for sid in reachable:
+        s = table.get(sid)
+        if s is None:
+            continue
+        # Direct DEF of a base gesture (no ops).
+        if s.kind == "DEF" and is_cello_gesture(s.type_id):
+            res.gestures[sid] = CelloGestureResolved(
+                id=sid, base=s.type_id or "", ops=[],
+            )
+        elif s.kind == "MOD":
+            resolved = resolve_cello_gesture_chain(sid, table)
+            if resolved is not None:
+                res.gestures[sid] = resolved
+
+    # Walk GRPs from root, collecting note USEs with their full context.
+    # `_expand_cello_grp` recurses, tracking inherited seed and global time.
+    _expand_cello_grp(
+        grp=table[root],
+        global_at=0.0,
+        global_dur=None,
+        inherited_seed=None,
+        prev_gesture_id=None,  # for fallback transition_from
+        table=table,
+        reachable=reachable,
+        res=res,
+        instance_counters={},
+    )
+    return res
+
+
+def _natural_cello_dur(
+    entity_id: str | None,
+    table: dict[str, Statement],
+) -> float:
+    """Compute the natural local duration of a cello entity."""
+    if entity_id is None or entity_id not in table:
+        return 1.0
+    s = table[entity_id]
+    if s.kind == "GRP":
+        total = 0.0
+        cursor = 0.0
+        for child in s.children:
+            if child.kind != "USE":
+                continue
+            at = child.at if child.at is not None else cursor
+            if child.dur is not None:
+                dur = child.dur
+            else:
+                dur = _natural_cello_dur(child.id, table)
+            cursor = at + dur
+            total = max(total, cursor)
+        return total
+    if s.kind == "DEF" and s.type_id == "cello.note":
+        # cello.note DEFs do not carry duration; the USE supplies it.
+        # Default 1.0 if neither end supplies one.
+        return 1.0
+    return 1.0
+
+
+def _expand_cello_grp(
+    grp: Statement,
+    global_at: float,
+    global_dur: float | None,
+    inherited_seed: int | None,
+    prev_gesture_id: str | None,
+    table: dict[str, Statement],
+    reachable: set[str],
+    res: CelloResolution,
+    instance_counters: dict[str, int],
+) -> tuple[float, str | None]:
+    """Expand a GRP. Returns (end_time, last_gesture_id_seen).
+
+    The last_gesture_id_seen lets transition_from work even without
+    being explicitly written: a cello.note USE without
+    `transition_from=` inherits the previous note's gesture as the
+    transition source.
+    """
+    # GRP-level seed takes effect for this scope.
+    effective_seed = grp.seed if grp.seed is not None else inherited_seed
+
+    # Sequential timing (the cello dialect uses sequential mode).
+    cursor = 0.0
+    local_end = 0.0
+    resolved_uses: list[tuple[Statement, float, float]] = []
+    for child in grp.children:
+        if child.kind != "USE":
+            continue
+        local_at = child.at if child.at is not None else cursor
+        if child.dur is not None:
+            local_dur = child.dur
+        else:
+            local_dur = _natural_cello_dur(child.id, table)
+        resolved_uses.append((child, local_at, local_dur))
+        cursor = local_at + local_dur
+        local_end = max(local_end, cursor)
+
+    scale = 1.0
+    if global_dur is not None and local_end > 0.0:
+        scale = global_dur / local_end
+
+    last_gesture = prev_gesture_id
+
+    for child, local_at, local_dur in resolved_uses:
+        child_global_at = global_at + local_at * scale
+        child_global_dur = local_dur * scale
+        target = table.get(child.id) if child.id else None
+        if target is None:
+            continue
+
+        # Recurse into reachable cello-containing GRPs.
+        if target.kind == "GRP":
+            _, last_gesture = _expand_cello_grp(
+                grp=target,
+                global_at=child_global_at,
+                global_dur=child_global_dur,
+                inherited_seed=effective_seed,
+                prev_gesture_id=last_gesture,
+                table=table, reachable=reachable, res=res,
+                instance_counters=instance_counters,
+            )
+            continue
+
+        # A direct USE of a cello.note DEF.
+        if target.kind == "DEF" and target.type_id == "cello.note":
+            note = _resolve_cello_note(
+                use=child, note_def=target,
+                global_at=child_global_at, global_dur=child_global_dur,
+                inherited_seed=effective_seed,
+                prev_gesture=last_gesture,
+                table=table, res=res,
+                instance_counters=instance_counters,
+            )
+            res.notes.append(note)
+            last_gesture = note.gesture_id
+
+    return (global_at + local_end * scale, last_gesture)
+
+
+def _resolve_cello_note(
+    use: Statement,
+    note_def: Statement,
+    global_at: float,
+    global_dur: float,
+    inherited_seed: int | None,
+    prev_gesture: str | None,
+    table: dict[str, Statement],
+    res: CelloResolution,
+    instance_counters: dict[str, int],
+) -> CelloNoteResolved:
+    """Resolve one USE of a cello.note DEF into a CelloNoteResolved."""
+    # Pitch: from DEF, or overridden in the USE (cello.note's `pitch`
+    # parameter; conventionally on the DEF, but USE override allowed).
+    pitch = use.params.get("pitch") or note_def.params.get("pitch") or "?"
+
+    # Gesture: from USE override `gesture=`, or DEF param `gesture=`.
+    # In both cases we expect a `('ref', 'gesture_id')` value.
+    gesture_value = (
+        use.params.get("gesture") or note_def.params.get("gesture")
+    )
+    gesture_id: str | None = None
+    if isinstance(gesture_value, tuple) and gesture_value[0] == "ref":
+        gesture_id = gesture_value[1]
+    elif isinstance(gesture_value, str):
+        gesture_id = gesture_value
+
+    # Transition: explicit USE override `transition_from=ref(g)` or the
+    # previous note's gesture (implicit chaining).
+    trans_value = use.params.get("transition_from")
+    explicit_trans: str | None = None
+    if isinstance(trans_value, tuple) and trans_value[0] == "ref":
+        explicit_trans = trans_value[1]
+    elif isinstance(trans_value, str):
+        explicit_trans = trans_value
+
+    transition_from = explicit_trans  # explicit wins; implicit not auto-set
+    # Implicit chaining: cello musicians naturally play one note after
+    # another; the transition is implicit. v0.3 keeps the marker
+    # EXPLICIT — authors who want the implicit case write
+    # `transition_from=ref(prev_id)` themselves. This avoids surprise
+    # behavior. Recorded here for future reconsideration.
+
+    # Resolve transition rule.
+    trans_resolver: str | None = None
+    trans_runtime: bool = False
+    if transition_from:
+        from_base = _base_of(transition_from, res)
+        to_base = _base_of(gesture_id, res) if gesture_id else None
+        trans_resolver, trans_runtime = lookup_cello_transition(
+            from_base, to_base,
+        )
+
+    # Seed bookkeeping: instance counter is per-gesture-id-within-scene.
+    seed_tuple: tuple[int, str, int] | None = None
+    if gesture_id and gesture_id in res.gestures:
+        g = res.gestures[gesture_id]
+        if g.humanize_amount is not None:
+            # Determine parent seed for this humanize:
+            # explicit MOD seed wins; otherwise inherited GRP seed.
+            parent = (
+                g.humanize_seed_explicit
+                if g.humanize_seed_explicit is not None
+                else inherited_seed
+            )
+            if parent is None:
+                res.warnings.append(
+                    f"humanize on {gesture_id} has no seed source; "
+                    f"add a GRP seed= or explicit seed in the MOD"
+                )
+                parent = 0
+            counter = instance_counters.get(gesture_id, 0)
+            seed_tuple = (parent, gesture_id, counter)
+            instance_counters[gesture_id] = counter + 1
+
+    # USE-level seed override (extends the model; very rarely written).
+    use_seed = use.params.get("seed")
+    if use_seed is not None and seed_tuple is not None:
+        seed_tuple = (int(use_seed), seed_tuple[1], seed_tuple[2])
+
+    return CelloNoteResolved(
+        t=global_at, pitch=str(pitch), dur=global_dur,
+        gesture_id=gesture_id,
+        transition_from=transition_from,
+        transition_resolver=trans_resolver,
+        transition_runtime_state=trans_runtime,
+        inherited_seed=inherited_seed,
+        seed_tuple=seed_tuple,
+    )
+
+
+def _base_of(gesture_id: str, res: CelloResolution) -> str | None:
+    g = res.gestures.get(gesture_id)
+    return g.base if g else None
+
+
+def render_cello_resolution(res: CelloResolution) -> str:
+    """Stable text dump for diffable reference output."""
+    lines: list[str] = []
+    lines.append(f"# cello resolution: "
+                 f"{len(res.gestures)} gestures, {len(res.notes)} notes")
+    if res.warnings:
+        lines.append(f"# warnings: {len(res.warnings)}")
+        for w in res.warnings:
+            lines.append(f"# WARN  {w}")
+    lines.append("")
+    lines.append("# gesture variants (sorted by id):")
+    for gid in sorted(res.gestures):
+        lines.extend(res.gestures[gid].as_lines())
+        lines.append("")
+    lines.append("# note events (in performance order):")
+    for note in res.notes:
+        lines.append(note.as_line())
+    return "\n".join(lines) + "\n"
+
+
+
 
 def detect_dialects(
     stmts: list[Statement],
@@ -1412,7 +2011,7 @@ def main() -> int:
                     help="root GRP id for reachability (default: demo_root)")
     ap.add_argument("--dump-reachable", action="store_true",
                     help="print the reachability set and exit")
-    ap.add_argument("--mode", choices=["auto", "music", "patch"],
+    ap.add_argument("--mode", choices=["auto", "music", "patch", "cello"],
                     default="auto",
                     help="output mode (default: auto-detect by dialect)")
     args = ap.parse_args()
@@ -1434,7 +2033,9 @@ def main() -> int:
     mode = args.mode
     if mode == "auto":
         dialects = detect_dialects(stmts, root=args.root)
-        if "patch" in dialects:
+        if "cello" in dialects:
+            mode = "cello"
+        elif "patch" in dialects:
             mode = "patch"
         else:
             mode = "music"
@@ -1447,9 +2048,13 @@ def main() -> int:
         graph = expand_patch(stmts, root=args.root)
         sys.stdout.write(render_patch_graph(graph))
         if graph.warnings:
-            # Echo warnings to stderr too, so test harnesses can pick
-            # them up without parsing the body.
             for w in graph.warnings:
+                print(f"warning: {w}", file=sys.stderr)
+    elif mode == "cello":
+        res = expand_cello(stmts, root=args.root)
+        sys.stdout.write(render_cello_resolution(res))
+        if res.warnings:
+            for w in res.warnings:
                 print(f"warning: {w}", file=sys.stderr)
     return 0
 

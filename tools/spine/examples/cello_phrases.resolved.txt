@@ -1,0 +1,90 @@
+# cello resolution: 21 gestures, 11 notes
+
+# gesture variants (sorted by id):
+gesture base_détaché base=cello.gesture.détaché
+
+gesture base_martelé base=cello.gesture.martelé
+
+gesture base_vibrato_warm base=cello.gesture.vibrato_warm
+
+gesture legato_aftermath base=cello.gesture.détaché
+    with_pressure ('fall', 0.7, 0.1)
+    with_depth ('grow', 0.0, 0.3)
+
+gesture legato_arc base=cello.gesture.détaché
+    slur_from_prev None
+
+gesture legato_h base=cello.gesture.détaché
+    with_pressure ('fall', 0.7, 0.1)
+    with_depth ('grow', 0.0, 0.3)
+    humanize 0.05 seed=2718
+
+gesture legato_swell base=cello.gesture.détaché
+    slur_from_prev None
+    with_pressure ('rise', 0.0, 0.3)
+
+gesture m_loud base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.7)
+
+gesture m_loud_h base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.7)
+    humanize 0.04 seed=2718
+
+gesture m_loudest base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.85)
+    with_attack ('sharper', 0.2)
+
+gesture m_loudest_h base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.85)
+    with_attack ('sharper', 0.2)
+    humanize 0.04 seed=2718
+
+gesture m_medium base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.55)
+
+gesture m_medium_h base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.55)
+    humanize 0.04 seed=2718
+
+gesture m_quiet base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.4)
+
+gesture m_quiet_h base=cello.gesture.martelé
+    with_bow_pressure ('hold', 0.4)
+    humanize 0.04 seed=2718
+
+gesture vib_decel base=cello.gesture.vibrato_warm
+    decelerando 0.7
+    with_depth ('ref', 'fall_smooth')
+
+gesture vib_decel_h base=cello.gesture.vibrato_warm
+    decelerando 0.7
+    with_depth ('ref', 'fall_smooth')
+    humanize 0.05 seed=inherited
+
+gesture vib_fade base=cello.gesture.vibrato_warm
+    with_depth ('fall', 0.3, 0.0)
+
+gesture vib_fade_h base=cello.gesture.vibrato_warm
+    with_depth ('fall', 0.3, 0.0)
+    humanize 0.05 seed=inherited
+
+gesture vib_swell base=cello.gesture.vibrato_warm
+    with_depth ('ref', 'swell_then_settle')
+
+gesture vib_swell_h base=cello.gesture.vibrato_warm
+    with_depth ('ref', 'swell_then_settle')
+    humanize 0.05 seed=inherited
+
+# note events (in performance order):
+t=  0.0000  pitch=A3    dur=1.5000  gesture=base_détaché
+t=  1.5000  pitch=C4    dur=0.5000  gesture=legato_arc
+t=  2.0000  pitch=D4    dur=2.0000  gesture=legato_swell
+t=  4.0000  pitch=D4    dur=2.0000  gesture=vib_swell_h  seed_tuple=(1234, 'vib_swell_h', 0)
+t=  6.0000  pitch=Bb3   dur=1.5000  gesture=vib_decel_h  seed_tuple=(1234, 'vib_decel_h', 0)
+t=  7.5000  pitch=A3    dur=2.5000  gesture=vib_fade_h  seed_tuple=(1234, 'vib_fade_h', 0)
+t= 12.0000  pitch=G3    dur=0.5000  gesture=m_quiet_h  seed_tuple=(2718, 'm_quiet_h', 0)
+t= 12.5000  pitch=G3    dur=0.5000  gesture=m_medium_h  seed_tuple=(2718, 'm_medium_h', 0)
+t= 13.0000  pitch=Bb3   dur=0.5000  gesture=m_loud_h  seed_tuple=(2718, 'm_loud_h', 0)
+t= 13.5000  pitch=D4    dur=0.5000  gesture=m_loudest_h  seed_tuple=(2718, 'm_loudest_h', 0)
+t= 14.0000  pitch=D4    dur=2.0000  gesture=legato_h  transition_from=m_loudest_h resolver=lift_and_settle (runtime_state)  seed_tuple=(2718, 'legato_h', 0)
