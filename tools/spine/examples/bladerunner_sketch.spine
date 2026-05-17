@@ -1,0 +1,146 @@
+# bladerunner_sketch.spine
+#
+# Prototype C example for SPINE v0.2.
+#
+# A streaming-soundscape patch in the spirit of the Bitwig Grid patch
+# you sent: oscillators, modulators, a clocked sample-and-hold
+# sequencer, and a short allpass reverb tail. Once started, this patch
+# runs indefinitely; the simulator will run it for 5 simulated seconds
+# at 100 Hz and emit a trace showing the soundscape evolving.
+#
+# This is NOT an audio synthesizer. The simulator uses stub functions
+# (sine for oscillators, IIR averaging for filters, simple shift for
+# delays). The point is to prove SPINE can describe the graph, not to
+# make sound.
+#
+# Total: 15 patch nodes organized as four sub-GRPs feeding a top-level
+# mixer.
+#
+# What this exercises that prior prototypes did not:
+#   - Streaming-lifetime entities (oscillators, LFOs, filters, delays)
+#   - event-driven entities (dice S&H, envelope)
+#   - Feedback through delay-line inputs (the reverb's allpass tails)
+#   - Cross-section modulation (one LFO feeds two sections)
+#   - 100-Hz tick simulation producing a probe trace
+#
+# Read the four sub-GRPs in this order to follow the audio path:
+#   modulation_network -> drone_section -> sequencer_section -> reverb_tail
+
+# ----------------------------------------------------------------------
+# Modulation network
+# ----------------------------------------------------------------------
+# Two slow LFOs at different rates cross-feed each other indirectly via
+# the things they modulate. lfo_a drives the drone's filter cutoff;
+# lfo_b drives the sequencer clock's rate. Together they produce slow
+# evolution: the timbre breathes while the rhythm wobbles.
+
+DEF lfo_a : patch.lfo { waveform=sine freq=0.13 amplitude=0.4 offset=0.5 }
+DEF lfo_b : patch.lfo { waveform=triangle freq=0.07 amplitude=0.3 offset=1.0 }
+
+GRP modulation_network {
+  USE lfo_a
+  USE lfo_b
+}
+
+# ----------------------------------------------------------------------
+# Drone section
+# ----------------------------------------------------------------------
+# Two slightly detuned oscillators mixed and run through a slowly
+# evolving lowpass. The detune is fixed; the modulation comes from
+# lfo_a sweeping the cutoff.
+
+DEF drone_osc_a : patch.oscillator { waveform=sawtooth freq=55.0 }
+DEF drone_osc_b : patch.oscillator { waveform=sawtooth freq=55.4 }
+DEF drone_mix   : patch.mixer
+DEF drone_lpf   : patch.lowpass    { cutoff=400.0 }
+
+LNK drone_osc_a.out -> drone_mix.in0
+LNK drone_osc_b.out -> drone_mix.in1
+LNK drone_mix.out   -> drone_lpf.in
+LNK lfo_a.out       -> drone_lpf.cutoff_mod
+
+GRP drone_section {
+  USE drone_osc_a
+  USE drone_osc_b
+  USE drone_mix
+  USE drone_lpf
+}
+
+# ----------------------------------------------------------------------
+# Sequencer section
+# ----------------------------------------------------------------------
+# A clock fires triggers; each trigger samples a new random value
+# (dice) which becomes the cutoff of a filtered oscillator. An
+# envelope shapes the amplitude per trigger. lfo_b modulates the
+# clock rate, so the rhythm itself evolves.
+
+DEF seq_clock : patch.clock    { rate=2.0 }
+DEF seq_dice  : patch.dice     { unipolar=true scale=1500.0 offset=300.0 }
+DEF seq_env   : patch.envelope { attack=0.005 decay=0.15 sustain=0.0 release=0.20 }
+DEF seq_osc   : patch.oscillator { waveform=square freq=110.0 }
+DEF seq_filt  : patch.lowpass  { cutoff=800.0 }
+
+LNK lfo_b.out       -> seq_clock.rate_mod
+LNK seq_clock.trigger -> seq_dice.trigger
+LNK seq_clock.trigger -> seq_env.trigger
+LNK seq_dice.out    -> seq_filt.cutoff_mod
+LNK seq_osc.out     -> seq_filt.in
+
+GRP sequencer_section {
+  USE seq_clock
+  USE seq_dice
+  USE seq_env
+  USE seq_osc
+  USE seq_filt
+}
+
+# ----------------------------------------------------------------------
+# Output mix + reverb tail
+# ----------------------------------------------------------------------
+# Both sections feed a master mix. The reverb tail is a pair of allpass
+# delays in series, each with feedback into its own input (this is the
+# load-bearing test of feedback-edge handling — the cycle is allowed
+# because the destination is a delay's in port).
+
+DEF master_mix  : patch.mixer
+DEF reverb_ap1  : patch.allpass_delay { time=0.037 feedback=0.6 }
+DEF reverb_ap2  : patch.allpass_delay { time=0.083 feedback=0.6 }
+DEF scene_main  : patch.scene_out
+
+LNK drone_lpf.out  -> master_mix.in0
+LNK seq_filt.out   -> master_mix.in1
+
+# Feedback path: the reverb's output is fed back into its own input
+# via the allpass chain. Without delay nodes this would be an illegal
+# cycle; PATCH_FEEDBACK_INPUTS in expand.py whitelists patch.delay and
+# patch.allpass_delay `in` ports for this.
+LNK master_mix.out -> reverb_ap1.in
+LNK reverb_ap1.out -> reverb_ap2.in
+LNK reverb_ap2.out -> reverb_ap1.in   # feedback loop
+
+LNK reverb_ap2.out -> scene_main.in
+
+GRP reverb_tail {
+  USE master_mix
+  USE reverb_ap1
+  USE reverb_ap2
+  USE scene_main
+}
+
+# ----------------------------------------------------------------------
+# An unreachable streaming node, to verify reachability pruning still
+# works for streaming-lifetime entities.
+# ----------------------------------------------------------------------
+
+DEF orphan_osc : patch.oscillator { waveform=sine freq=999.0 }
+
+# ----------------------------------------------------------------------
+# Demo root. Reachability walks from here.
+# ----------------------------------------------------------------------
+
+GRP demo_root {
+  USE modulation_network
+  USE drone_section
+  USE sequencer_section
+  USE reverb_tail
+}

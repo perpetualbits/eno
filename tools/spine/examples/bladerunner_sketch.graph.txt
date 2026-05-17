@@ -1,0 +1,92 @@
+# patch graph: 15 nodes, 15 edges
+
+# topological order:
+#   drone_osc_a
+#   drone_osc_b
+#   drone_mix
+#   lfo_a
+#   drone_lpf
+#   lfo_b
+#   reverb_ap2
+#   scene_main
+#   seq_clock
+#   seq_dice
+#   seq_env
+#   seq_osc
+#   seq_filt
+#   master_mix
+#   reverb_ap1
+
+node drone_osc_a : patch.oscillator
+    freq = 55.0
+    waveform = 'sawtooth'
+
+node drone_osc_b : patch.oscillator
+    freq = 55.4
+    waveform = 'sawtooth'
+
+node drone_mix : patch.mixer
+
+node lfo_a : patch.lfo
+    amplitude = 0.4
+    freq = 0.13
+    offset = 0.5
+    waveform = 'sine'
+
+node drone_lpf : patch.lowpass
+    cutoff = 400.0
+
+node lfo_b : patch.lfo
+    amplitude = 0.3
+    freq = 0.07
+    offset = 1.0
+    waveform = 'triangle'
+
+node reverb_ap2 : patch.allpass_delay
+    feedback = 0.6
+    time = 0.083
+
+node scene_main : patch.scene_out
+
+node seq_clock : patch.clock
+    rate = 2.0
+
+node seq_dice : patch.dice
+    offset = 300.0
+    scale = 1500.0
+    unipolar = 'true'
+
+node seq_env : patch.envelope
+    attack = 0.005
+    decay = 0.15
+    release = 0.2
+    sustain = 0.0
+
+node seq_osc : patch.oscillator
+    freq = 110.0
+    waveform = 'square'
+
+node seq_filt : patch.lowpass
+    cutoff = 800.0
+
+node master_mix : patch.mixer
+
+node reverb_ap1 : patch.allpass_delay
+    feedback = 0.6
+    time = 0.037
+
+edge drone_lpf.out -> master_mix.in0  [signal -> signal]
+edge drone_mix.out -> drone_lpf.in  [signal -> signal]
+edge drone_osc_a.out -> drone_mix.in0  [signal -> signal]
+edge drone_osc_b.out -> drone_mix.in1  [signal -> signal]
+edge lfo_a.out -> drone_lpf.cutoff_mod  [value -> value]
+edge lfo_b.out -> seq_clock.rate_mod  [value -> value]
+edge master_mix.out -> reverb_ap1.in  [signal -> signal]
+edge reverb_ap1.out -> reverb_ap2.in  [signal -> signal]  [feedback]
+edge reverb_ap2.out -> reverb_ap1.in  [signal -> signal]  [feedback]
+edge reverb_ap2.out -> scene_main.in  [signal -> signal]
+edge seq_clock.trigger -> seq_dice.trigger  [event -> event]
+edge seq_clock.trigger -> seq_env.trigger  [event -> event]
+edge seq_dice.out -> seq_filt.cutoff_mod  [value -> value]
+edge seq_filt.out -> master_mix.in1  [signal -> signal]
+edge seq_osc.out -> seq_filt.in  [signal -> signal]

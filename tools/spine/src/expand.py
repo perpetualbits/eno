@@ -828,59 +828,166 @@ def _natural_dur(entity_id: str | None, table: dict[str, Statement]) -> float:
 # and returns a graph description.
 # =====================================================================
 
-# Per-type port catalogue. Each entry maps port name -> shape.
-# Shapes are documented in spine_dialect_template.md §1.3:
-#   signal       continuous audio-rate data
-#   value        slow control data (e.g. envelope -> cutoff)
-#   event        discrete trigger / note_on / note_off
-# Music dialect ports are listed alongside so cross-dialect LNK shape
-# checks have something to look up.
-PATCH_PORTS: dict[str, dict[str, dict[str, str]]] = {
+# Per-type catalogue. Each entry has:
+#   inputs/outputs: port name -> shape (signal, value, event)
+#   lifetime: how the runtime treats instances of this type
+#     "streaming"     produces output every tick while active
+#     "event-driven"  responds only to incoming events
+#     "precomputed"   computed once before activation, then read-only
+#     "sink"          terminal; consumes input, no output
+# Ports are documented in spine_dialect_template.md §1.3.
+# Lifetime is documented in §1.7 (added with Prototype C — see
+# tools/spine/docs/PROTOTYPE_C.md for the rationale).
+PATCH_PORTS: dict[str, dict[str, Any]] = {
+    # --- Sources / oscillators / noise -------------------------------
     "patch.oscillator": {
-        "inputs": {"freq_mod": "value"},
+        "inputs": {"freq_mod": "value", "phase_mod": "value"},
         "outputs": {"out": "signal"},
+        "lifetime": "streaming",
     },
+    "patch.lfo": {
+        # Same shape as oscillator but conventionally low-frequency.
+        # Distinguishing the type keeps probes readable and lets the
+        # eventual softsynth pick a cheaper implementation.
+        "inputs": {"freq_mod": "value"},
+        "outputs": {"out": "value"},
+        "lifetime": "streaming",
+    },
+    "patch.noise": {
+        "inputs": {},
+        "outputs": {"out": "signal"},
+        "lifetime": "streaming",
+    },
+
+    # --- Time / triggers ---------------------------------------------
+    "patch.clock": {
+        # Emits a trigger event every `period` seconds. The simulator
+        # ticks the phase and fires when it wraps.
+        "inputs": {"rate_mod": "value"},
+        "outputs": {"trigger": "event"},
+        "lifetime": "streaming",
+    },
+    "patch.dice": {
+        # Sample-and-hold randomizer. On each incoming trigger, picks
+        # a new value in [-1, 1] (or [0,1] if `unipolar=true`). Holds
+        # that value on `out` between triggers.
+        "inputs": {"trigger": "event"},
+        "outputs": {"out": "value"},
+        "lifetime": "event-driven",
+    },
+
+    # --- Envelopes ---------------------------------------------------
     "patch.envelope": {
         "inputs": {"trigger": "event"},
         "outputs": {"out": "value"},
+        "lifetime": "event-driven",
     },
+
+    # --- Filters -----------------------------------------------------
     "patch.filter": {
+        # Kept from Prototype B for backward compatibility.
         "inputs": {"in": "signal", "cutoff_mod": "value"},
         "outputs": {"out": "signal"},
+        "lifetime": "streaming",
     },
+    "patch.lowpass": {
+        "inputs": {"in": "signal", "cutoff_mod": "value"},
+        "outputs": {"out": "signal"},
+        "lifetime": "streaming",
+    },
+    "patch.highpass": {
+        "inputs": {"in": "signal", "cutoff_mod": "value"},
+        "outputs": {"out": "signal"},
+        "lifetime": "streaming",
+    },
+
+    # --- Delays (feedback-capable) -----------------------------------
+    # An edge into the `in` port of a delay or allpass_delay is allowed
+    # to participate in a cycle. See topo_sort_patch().
+    "patch.delay": {
+        "inputs": {"in": "signal", "time_mod": "value", "fb_mod": "value"},
+        "outputs": {"out": "signal"},
+        "lifetime": "streaming",
+    },
+    "patch.allpass_delay": {
+        "inputs": {"in": "signal", "time_mod": "value", "fb_mod": "value"},
+        "outputs": {"out": "signal"},
+        "lifetime": "streaming",
+    },
+
+    # --- Mixing and sinks --------------------------------------------
     "patch.gain": {
         "inputs": {"in": "signal", "gain_mod": "value"},
         "outputs": {"out": "signal"},
+        "lifetime": "streaming",
+    },
+    "patch.mixer": {
+        # Accepts up to 8 numbered signal inputs. The simulator sums
+        # whichever are connected and divides by the connected count.
+        "inputs": {
+            "in0": "signal", "in1": "signal", "in2": "signal",
+            "in3": "signal", "in4": "signal", "in5": "signal",
+            "in6": "signal", "in7": "signal",
+        },
+        "outputs": {"out": "signal"},
+        "lifetime": "streaming",
     },
     "patch.output": {
+        # Prototype B's terminal node. Kept; superseded by scene_out
+        # for streaming-aware work.
         "inputs": {"in": "signal"},
         "outputs": {},
+        "lifetime": "sink",
+    },
+    "patch.scene_out": {
+        # Streaming-aware terminal. The simulator probes this every
+        # tick as the canonical "what the listener hears."
+        "inputs": {"in": "signal"},
+        "outputs": {},
+        "lifetime": "sink",
     },
 }
 
-# Music dialect ports for cross-dialect LNK shape checking. Lifted out
-# of the music interpreter so the patch resolver can see them.
-MUSIC_PORTS: dict[str, dict[str, dict[str, str]]] = {
+# The set of (type_id, port_name) pairs that may be the destination of
+# a feedback edge. Other cycles are errors. Kept minimal: only the
+# delay-line signal inputs.
+PATCH_FEEDBACK_INPUTS: set[tuple[str, str]] = {
+    ("patch.delay", "in"),
+    ("patch.allpass_delay", "in"),
+}
+
+# Music dialect ports for cross-dialect LNK shape checking.
+MUSIC_PORTS: dict[str, dict[str, Any]] = {
     "music.note": {
         "inputs": {},
         "outputs": {"out": "event", "note_on": "event", "note_off": "event"},
+        "lifetime": "event-driven",
     },
     "music.rest": {
         "inputs": {},
         "outputs": {"out": "event"},
+        "lifetime": "event-driven",
     },
     "music.phrase": {
         "inputs": {},
         "outputs": {"out": "event", "note_on": "event", "note_off": "event"},
+        "lifetime": "event-driven",
     },
     "music.instrument": {
         "inputs": {"in": "event"},
         "outputs": {"out": "signal"},
+        "lifetime": "streaming",
     },
 }
 
 # Union view used by the resolver.
 ALL_PORTS = {**PATCH_PORTS, **MUSIC_PORTS}
+
+
+def lifetime_of(type_id: str) -> str | None:
+    """Lookup the runtime lifetime classification for a type id."""
+    entry = ALL_PORTS.get(type_id)
+    return entry.get("lifetime") if entry else None
 
 
 @dataclass
@@ -906,6 +1013,10 @@ class PatchEdge:
     shape_src: str | None       # port shape on the source side
     shape_dst: str | None       # port shape on the destination side
     warning: str | None = None  # set if shapes mismatched or unknown
+    is_feedback: bool = False   # set if this edge participates in an
+                                # allowed feedback cycle (e.g. into a
+                                # delay-line input). Such edges are
+                                # ignored for topological ordering.
 
     def as_line(self) -> str:
         shape = (
@@ -913,9 +1024,10 @@ class PatchEdge:
             if self.shape_src and self.shape_dst else ""
         )
         flag = f"  WARNING: {self.warning}" if self.warning else ""
+        fb = "  [feedback]" if self.is_feedback else ""
         return (
             f"edge {self.src_node}.{self.src_port}"
-            f" -> {self.dst_node}.{self.dst_port}{shape}{flag}"
+            f" -> {self.dst_node}.{self.dst_port}{shape}{fb}{flag}"
         )
 
 
@@ -1090,11 +1202,15 @@ def resolve_patch_graph(
                 f"port shape mismatch: {shape_src} -> {shape_dst}"
             )
 
+        # is_feedback is set later by topo_sort_patch, only for edges
+        # that actually participate in a cycle through a feedback-
+        # eligible input. Edges into delay inputs that don't form a
+        # cycle stay is_feedback=False so they constrain ordering.
         edge = PatchEdge(
             src_node=src_node, src_port=src_port,
             dst_node=dst_node, dst_port=dst_port,
             shape_src=shape_src, shape_dst=shape_dst,
-            warning=warning,
+            warning=warning, is_feedback=False,
         )
         graph.edges.append(edge)
         if warning:
@@ -1121,37 +1237,96 @@ def is_mod_targeting_patch(
 
 
 def topo_sort_patch(graph: PatchGraph) -> list[str]:
-    """Kahn's algorithm. Cycles cause the cycle members to be reported
-    at the end of the order with a warning appended to the graph."""
+    """Two-pass Kahn's algorithm with selective feedback-edge removal.
+
+    Pass 1: try to topo-sort using all edges. If it succeeds, done.
+
+    Pass 2: if cycles remain, mark cycle-participant edges into delay-
+    line inputs as actual feedback edges (those become is_feedback=True
+    on the edge) and re-run. If cycles remain after that, the cycle
+    routes through something other than a delay and is a real error.
+
+    Edges that are merely eligible to be feedback (into a delay input)
+    but not actually closing a cycle keep is_feedback=False, so they
+    constrain ordering normally. This avoids the bug where a simple
+    `mixer -> delay -> out` chain put the mixer last because the
+    mixer's only out-edge targeted a delay.
+    """
     node_ids = {n.id for n in graph.nodes}
-    incoming: dict[str, int] = {nid: 0 for nid in node_ids}
-    succ: dict[str, list[str]] = {nid: [] for nid in node_ids}
+
+    def _kahn(skip_predicate) -> tuple[list[str], set[str]]:
+        incoming: dict[str, int] = {nid: 0 for nid in node_ids}
+        succ: dict[str, list[str]] = {nid: [] for nid in node_ids}
+        for e in graph.edges:
+            if skip_predicate(e):
+                continue
+            if e.src_node in node_ids and e.dst_node in node_ids:
+                incoming[e.dst_node] += 1
+                succ[e.src_node].append(e.dst_node)
+        ready = sorted(nid for nid, deg in incoming.items() if deg == 0)
+        order: list[str] = []
+        while ready:
+            nid = ready.pop(0)
+            order.append(nid)
+            for nxt in succ[nid]:
+                incoming[nxt] -= 1
+                if incoming[nxt] == 0:
+                    ready.append(nxt)
+            ready.sort()
+        unresolved = node_ids - set(order)
+        return order, unresolved
+
+    # Pass 1: full graph, no feedback edges ignored. Don't honor any
+    # is_feedback flags yet — the flag will be set in pass 2 only if
+    # actually needed.
+    order, unresolved = _kahn(lambda e: False)
+    if not unresolved:
+        # Clear any premature is_feedback flags from edge construction:
+        # they were eligible but not needed.
+        for e in graph.edges:
+            e.is_feedback = False
+        return order
+
+    # Pass 2: mark cycle-participating delay-input edges as feedback,
+    # and try again skipping them.
     for e in graph.edges:
-        # Only count edges whose endpoints are both patch nodes for
-        # topological purposes. Cross-dialect inputs from music don't
-        # constrain patch order.
-        if e.src_node in node_ids and e.dst_node in node_ids:
-            incoming[e.dst_node] += 1
-            succ[e.src_node].append(e.dst_node)
-
-    ready = sorted(nid for nid, deg in incoming.items() if deg == 0)
-    order: list[str] = []
-    while ready:
-        nid = ready.pop(0)
-        order.append(nid)
-        for nxt in succ[nid]:
-            incoming[nxt] -= 1
-            if incoming[nxt] == 0:
-                ready.append(nxt)
-        ready.sort()
-
-    if len(order) < len(node_ids):
-        cycle_members = sorted(node_ids - set(order))
-        graph.warnings.append(
-            f"cycle detected; unordered members: {cycle_members}"
+        is_eligible = (
+            (e.src_node in node_ids and e.dst_node in node_ids)
+            and (
+                # The eligibility test from edge construction.
+                _edge_targets_feedback_input(e, graph)
+            )
         )
-        order.extend(cycle_members)
-    return order
+        # Mark only the eligible edges that lie inside the unresolved
+        # set (i.e., participate in a cycle).
+        if (is_eligible
+            and e.src_node in unresolved
+            and e.dst_node in unresolved):
+            e.is_feedback = True
+        else:
+            e.is_feedback = False
+
+    order2, unresolved2 = _kahn(lambda e: e.is_feedback)
+    if unresolved2:
+        cycle_members = sorted(unresolved2)
+        graph.warnings.append(
+            f"cycle detected without delay feedback path; "
+            f"unordered members: {cycle_members}"
+        )
+        order2.extend(cycle_members)
+    return order2
+
+
+def _edge_targets_feedback_input(
+    edge: "PatchEdge", graph: "PatchGraph",
+) -> bool:
+    """Look up whether `edge` targets a port listed in
+    PATCH_FEEDBACK_INPUTS."""
+    type_by_id = {n.id: n.type_id for n in graph.nodes}
+    dst_type = type_by_id.get(edge.dst_node)
+    if dst_type is None:
+        return False
+    return (dst_type, edge.dst_port) in PATCH_FEEDBACK_INPUTS
 
 
 def render_patch_graph(graph: PatchGraph) -> str:

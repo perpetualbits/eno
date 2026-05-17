@@ -102,7 +102,30 @@ How does this dialect interpret a group's local time?
 - **Default local duration:** how is local duration computed if a GRP
   doesn't declare one?
 
-### 1.7 Interpreter notes
+### 1.7 Lifetime and execution
+
+Each type declares one **lifetime**:
+
+- **streaming** — produces output continuously while reachable. Costs
+  CPU every tick. Examples: oscillators, LFOs, filters, delays.
+- **event-driven** — does work only when an event arrives at one of
+  its event-shape inputs. Costs CPU only on trigger. Examples: envelopes,
+  sample-and-hold (`patch.dice`), `music.note`.
+- **precomputed** — built once before activation, then read-only.
+  Examples (future): wavelet impulse responses, wavetables, baked LUTs.
+  Streaming entities may reference precomputed ones via `ref()`.
+- **sink** — terminal node, consumes input, produces no output. Example:
+  `patch.scene_out`.
+
+Lifetime is declared in the dialect's port catalog (currently in
+`expand.py` as `PATCH_PORTS` and `MUSIC_PORTS`; future versions will
+factor this into a dialect-specific schema file).
+
+Lifetime affects how a runtime schedules the entity (deferred to the
+runtime model document), how the simulator ticks it, and how
+reachability handles its teardown when a GRP exits (open).
+
+### 1.8 Interpreter notes
 
 - **Implementation:** language, location in repo.
 - **Output:** what the interpreter produces (events, samples, frames,
@@ -110,7 +133,7 @@ How does this dialect interpret a group's local time?
 - **Dependencies on other dialects:** if any.
 - **Known limitations / TODO.**
 
-### 1.8 Open questions
+### 1.9 Open questions
 
 Dialect-specific open questions, separate from the global ones in
 `spine_open_questions.md`.

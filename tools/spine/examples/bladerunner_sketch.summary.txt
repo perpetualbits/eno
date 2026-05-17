@@ -1,0 +1,7 @@
+# simulation: 500 ticks at 100.0 Hz = 5.00 s
+# probes: 3
+
+per-probe statistics:
+  scene_main.in         min=-2.0301  max=+1.7127  mean=-0.0378  rms=0.6613
+  lfo_a.out             min=+0.1764  max=+0.9000  mean=+0.6552  rms=0.6899
+  lfo_b.out             min=+0.8800  max=+1.2992  mean=+1.0896  rms=1.0963

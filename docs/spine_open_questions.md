@@ -189,6 +189,47 @@ demos we have in mind.
 **Force a decision when:** A demo needs interactive or generative
 timing.
 
+### 4.3a Streaming-USE lifetime semantics
+
+**Question:** When a USE references a GRP of streaming entities (a
+patchbay rather than a scheduled event sequence), what do `at` and
+`dur` mean? When does the patch start producing output, and when does
+it stop? What happens to allocated state when it stops?
+
+**Status:** Surfaced by Prototype C (the Bladerunner sketch).
+Prototype C dodged this by simulating the whole reachable graph for
+the entire simulation duration. Real demos cannot dodge it — a
+streaming patch must start somewhere and stop somewhere.
+
+**Current lean (from the design conversation):**
+
+- `at` is the wall-clock time the patch begins producing output.
+- `dur` omitted → the patch runs while its enclosing GRP is active
+  (scene-lifetime).
+- `dur` present → the patch runs for `dur` beats, then output is
+  gated off.
+- A `fade_out` USE-override controls the gating shape:
+  - absent → abrupt cutoff
+  - `fade_out=N` → linear fade over N beats
+  - `fade_out=ref(curve)` → fade following a named envelope/spline
+
+The audible behavior (abrupt vs. fade) is a SPINE concern. The
+*executable* behavior (when state is deallocated, when CPU stops
+being spent) is a runtime concern. The runtime model document, when
+written, will commit to a bound: after audible output ceases, the
+streaming graph is torn down within some bounded number of ticks.
+
+**Force a decision before:** Any prototype with scene transitions.
+
+**Open sub-questions:**
+- Does `fade_out` apply to event-driven children too, or only
+  streaming ones? Probably only streaming — events fire or they don't.
+- Does `at` allow negative values, meaning "the patch was already
+  running when the scene started, fade it in from the past"? Probably
+  not; pre-roll is a separate concern.
+- How are precomputed entities scheduled? The build-phase model
+  needs articulating, but no prototype needs it yet.
+
 ### 4.4 Loops and iteration
 
 **Question:** Is there an explicit "repeat N times" construct, or do
@@ -382,6 +423,50 @@ v0.2 and v0.3?
 **Current lean:** Every dialect declares a version. Stored documents
 declare which version of each dialect they require. Mismatch is an
 error with a clear message; migration is offline.
+
+### 9.4 Feedback-eligible input ports
+
+**Question:** How does a dialect declare which input ports may
+participate in a feedback cycle? Prototype C codifies this as
+`PATCH_FEEDBACK_INPUTS` in `expand.py`, a hardcoded set of
+`(type_id, port_name)` tuples that whitelist `patch.delay.in` and
+`patch.allpass_delay.in`. Should this graduate to a per-dialect
+schema?
+
+**Status:** Working as designed for two patch types. The list will
+grow as the patch dialect grows (likely `patch.feedback_node`,
+maybe `patch.echo`, eventually wavelet-based reverbs with feedback).
+A new dialect (e.g. `wavelet.coefficient_field` with state-fed
+operators) might want its own feedback-eligible ports.
+
+**Force a decision when:** A third dialect introduces feedback-
+capable ports.
+
+**Current lean:** Move into the dialect template's port catalog as
+an optional per-port flag (e.g. `feedback_eligible: true`). The
+topo sort reads this flag instead of a global set. Cheap rename, no
+semantics change.
+
+### 9.5 Multi-source input combining
+
+**Question:** When multiple LNKs target the same input port, how
+are they combined? Prototype C's simulator sums signal/value
+sources and OR's event sources. Is this universal across dialects,
+or per-dialect, or per-port?
+
+**Status:** Implemented in the simulator; documented in
+`spine_core_v0_2_design.md` §3.5. Currently dialect-blind: signal
++ signal = sum, event OR event = either-fires.
+
+**Force a decision when:** A dialect wants different semantics
+(e.g. "first-wins," "blend with a parameter," "stereo-pan based on
+source index").
+
+**Current lean:** Keep universal for v0.2 (sum signals, OR events).
+Per-port overrides via a `combine: sum | first | latest | replace`
+field in the port catalog if a real need surfaces. Mixer-style
+"weighted blend" is best expressed as an explicit `patch.mixer`
+node, not a port semantic.
 
 ---
 

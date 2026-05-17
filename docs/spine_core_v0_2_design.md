@@ -204,6 +204,16 @@ LNK is the mechanism for cross-domain wiring (e.g. Example 3 from the
 design discussion: a fractal generator's output feeding a cloth
 material's texture input). It is *not* a MOD case.
 
+**Multi-source inputs are legal.** A port may receive multiple
+incoming LNKs. The dialect interpreter decides how to combine them:
+signal/value-shape ports sum the sources, event-shape ports OR them
+(any source firing fires the destination). The mixer's `inN` ports
+have distinct names by convention because they want individually
+addressable connections; a delay's `in` port is genuinely single-
+named but may have multiple sources (e.g. main signal plus feedback)
+that sum naturally. Surfaced by Prototype C; see
+`tools/spine/docs/PROTOTYPE_C.md`.
+
 ### 3.6 GRP — group into a reusable scope
 
 ```text
