@@ -1,5 +1,5 @@
-#ifndef WAVELET_H
-#define WAVELET_H
+#ifndef CREST_H
+#define CREST_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -178,4 +178,19 @@ void stamp_simple(WaveletSquare       *dst,
  * --------------------------------------------------------------------------*/
 float validate_roundtrip(const float *samples, int n, float *samples_out);
 
-#endif /* WAVELET_H */
+/* ---------------------------------------------------------------------------
+ * Basis descriptor: returned by crest_basis_desc_<name>() to identify
+ * and parameterise a basis family.  Defined here because all basis
+ * implementations share the same WaveletSquare storage type.
+ * --------------------------------------------------------------------------*/
+typedef struct {
+    const char *name;       /* "cdf53", "db4", "chirplet", … */
+    int         n_params;   /* per-atom parameters beyond position */
+    int         iq_mode;    /* 0 = mono storage, 1 = analytic I+Q pair */
+    int         rvv_ready;  /* 1 if an RVV-optimised kernel exists */
+} CrestBasisDesc;
+
+/* Descriptor for the built-in CDF 5/3 basis. */
+const CrestBasisDesc *crest_basis_desc_cdf53(void);
+
+#endif /* CREST_H */

@@ -1,12 +1,13 @@
 # lib/crest/Makefile
 #
 # Builds:
-#   build/libwavelet.a       Static library, linked into other ENO components.
-#   build/test_wavelet       Test binary, links the static library.
+#   build/libcrest.a         Static library for all CREST modules.
+#   build/test_crest_core    Tests for the core module (WaveletSquare, CDF 5/3, stamp).
+#   build/test_crest_bases   Tests for the bases module (D4, chirplet, …).
 #
 # Targets:
 #   make           Build everything.
-#   make test      Build and run the test suite.
+#   make test      Build and run all test suites.
 #   make clean     Remove build artifacts.
 #   make riscv     Cross-compile for RISC-V (requires riscv64-linux-gnu-gcc).
 
@@ -20,29 +21,38 @@ CFLAGS  = -std=c11 -O2 -Wall -Wextra -Wpedantic \
 LDFLAGS = -lm
 
 BUILD   = build
-SRCS    = src/wavelet.c
-OBJS    = $(BUILD)/wavelet.o
-LIB     = $(BUILD)/libwavelet.a
-TEST    = $(BUILD)/test_wavelet
+SRCS    = src/crest_core.c src/crest_bases.c
+OBJS    = $(BUILD)/crest_core.o $(BUILD)/crest_bases.o
+LIB     = $(BUILD)/libcrest.a
+
+TEST_CORE  = $(BUILD)/test_crest_core
+TEST_BASES = $(BUILD)/test_crest_bases
 
 .PHONY: all test clean riscv
 
-all: $(LIB) $(TEST)
+all: $(LIB) $(TEST_CORE) $(TEST_BASES)
 
-test: $(TEST)
-	./$(TEST)
+test: $(TEST_CORE) $(TEST_BASES)
+	./$(TEST_CORE)
+	./$(TEST_BASES)
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/wavelet.o: src/wavelet.c include/wavelet.h | $(BUILD)
-	$(CC) $(CFLAGS) -c src/wavelet.c -o $@
+$(BUILD)/crest_core.o: src/crest_core.c include/crest.h | $(BUILD)
+	$(CC) $(CFLAGS) -c src/crest_core.c -o $@
+
+$(BUILD)/crest_bases.o: src/crest_bases.c include/crest.h include/crest_bases.h | $(BUILD)
+	$(CC) $(CFLAGS) -c src/crest_bases.c -o $@
 
 $(LIB): $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
-$(TEST): tests/test_wavelet.c $(LIB)
-	$(CC) $(CFLAGS) tests/test_wavelet.c $(LIB) -o $@ $(LDFLAGS)
+$(TEST_CORE): tests/test_crest_core.c $(LIB)
+	$(CC) $(CFLAGS) tests/test_crest_core.c $(LIB) -o $@ $(LDFLAGS)
+
+$(TEST_BASES): tests/test_crest_bases.c $(LIB)
+	$(CC) $(CFLAGS) tests/test_crest_bases.c $(LIB) -o $@ $(LDFLAGS)
 
 # RISC-V cross-build
 RISCV_CC     ?= riscv64-linux-gnu-gcc
@@ -54,11 +64,15 @@ RISCV_CFLAGS = -std=c11 -O2 -Wall -Wextra \
                -Iinclude
 
 riscv: | $(BUILD)
-	$(RISCV_CC) $(RISCV_CFLAGS) -c src/wavelet.c -o $(BUILD)/wavelet_rv.o
-	$(AR) rcs $(BUILD)/libwavelet_rv.a $(BUILD)/wavelet_rv.o
-	$(RISCV_CC) $(RISCV_CFLAGS) tests/test_wavelet.c $(BUILD)/libwavelet_rv.a \
-		-o $(BUILD)/test_wavelet_riscv $(LDFLAGS)
-	@echo "Built $(BUILD)/test_wavelet_riscv — copy to board and run."
+	$(RISCV_CC) $(RISCV_CFLAGS) -c src/crest_core.c  -o $(BUILD)/crest_core_rv.o
+	$(RISCV_CC) $(RISCV_CFLAGS) -c src/crest_bases.c -o $(BUILD)/crest_bases_rv.o
+	$(AR) rcs $(BUILD)/libcrest_rv.a \
+	    $(BUILD)/crest_core_rv.o $(BUILD)/crest_bases_rv.o
+	$(RISCV_CC) $(RISCV_CFLAGS) tests/test_crest_core.c  $(BUILD)/libcrest_rv.a \
+	    -o $(BUILD)/test_crest_core_riscv  $(LDFLAGS)
+	$(RISCV_CC) $(RISCV_CFLAGS) tests/test_crest_bases.c $(BUILD)/libcrest_rv.a \
+	    -o $(BUILD)/test_crest_bases_riscv $(LDFLAGS)
+	@echo "Built RISC-V binaries — copy to board and run."
 
 clean:
 	rm -rf $(BUILD)

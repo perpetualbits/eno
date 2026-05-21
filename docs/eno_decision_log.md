@@ -547,3 +547,36 @@ All five renames executed 2026-05-21 in one atomic migration commit:
 - **Affects:** `tools/smola/src/smola/__init__.py`.
 - **Decision:** bumped from `0.3.0` to `0.3.1`. Minor increment: adds
   features, no source incompatibilities with v0.3.
+
+---
+
+## 2026-05-21 — CREST crest_bases: file renames and D4
+
+*(Full reasoning in `crest_design.md` §4, §5.3, §13.1.)*
+
+### Internal crest_core files renamed
+
+- **Source:** Claude Code session.
+- **Affects:** `lib/crest/include/crest.h`, `lib/crest/src/crest_core.c`,
+  `lib/crest/tests/test_crest_core.c`, `lib/crest/Makefile`.
+- **Decision:** `wavelet.h` → `crest.h`, `wavelet.c` → `crest_core.c`,
+  `test_wavelet.c` → `test_crest_core.c`, library target `libcrest.a`.
+  The single unified library contains all CREST modules.
+
+### D4 uses the Mallat convolution form, not lifting
+
+- **Source:** Claude Code session.
+- **Affects:** `lib/crest/src/crest_bases.c`.
+- **Decision:** D4's four irrational taps do not factor into a simple two-step
+  lifting scheme. Implemented as polyphase gather (forward) and transpose
+  scatter (inverse) with a static scratch buffer. Perfect reconstruction
+  verified algebraically and by test (26+12 tests passing). Error < 1e-4.
+
+### D4 frequency isolation vs CDF 5/3 is not universal
+
+- **Source:** Claude Code session (test failure then analysis).
+- **Affects:** `lib/crest/tests/test_crest_bases.c`.
+- **Decision:** for short pure sinusoids, CDF 5/3's symmetric lifting can
+  match or slightly beat D4's peak-band energy fraction. D4's advantage
+  applies to broadband/noise signals in the infinite-length theory. The
+  comparison test uses ±5% tolerance and documents this nuance.

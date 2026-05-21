@@ -1,4 +1,4 @@
-#include "wavelet.h"
+#include "crest.h"
 
 #include <string.h>
 #include <math.h>
@@ -358,4 +358,18 @@ float validate_roundtrip(const float *samples, int n, float *samples_out) {
         if (e > max_err) max_err = e;
     }
     return max_err;
+}
+
+/* ===========================================================================
+ * Basis descriptor for CDF 5/3
+ * =========================================================================*/
+
+const CrestBasisDesc *crest_basis_desc_cdf53(void) {
+    static const CrestBasisDesc desc = {
+        .name      = "cdf53",
+        .n_params  = 0,
+        .iq_mode   = 0,
+        .rvv_ready = 0,
+    };
+    return &desc;
 }

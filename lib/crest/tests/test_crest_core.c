@@ -1,4 +1,4 @@
-#include "wavelet.h"
+#include "crest.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -515,7 +515,7 @@ static void test_band_frequency_8khz(void) {
 
 int main(void) {
     printf("=================================================================\n");
-    printf("Wavelet Core Test Suite (float32)\n");
+    printf("CREST Core Test Suite (float32)\n");
     printf("SQUARE_SAMPLES=%d  WAVELET_LEVELS=%d  SAMPLE_RATE=%d\n",
            SQUARE_SAMPLES, WAVELET_LEVELS, SAMPLE_RATE);
     printf("=================================================================\n\n");

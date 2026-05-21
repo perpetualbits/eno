@@ -171,8 +171,8 @@ coefficient manipulation per scale for artistic control.
 
 ## 4. Module: crest_core (existing)
 
-**File:** `lib/crest/src/wavelet.c` (to be renamed `crest_core.c` when
-crest_bases work begins).
+**Files:** `lib/crest/src/crest_core.c`, `lib/crest/include/crest.h`,
+`lib/crest/tests/test_crest_core.c` (renamed from `wavelet.*` 2026-05-21).
 
 **Status: implemented and tested (26 tests passing).**
 
@@ -288,8 +288,8 @@ typedef struct {
 
 | Basis id              | SPINE type                  | Priority | Status     | Notes |
 |-----------------------|-----------------------------|----------|------------|-------|
-| `cdf53`               | (default, not dialect-named) | done     | ✓ done     | The reference basis |
-| `db4`                 | —                           | high     | to do      | Daubechies-4; better for smooth signals and noise |
+| `cdf53`               | (default, not dialect-named) | done     | ✓ done     | The reference basis; descriptor in `crest_core.c` |
+| `db4`                 | —                           | high     | ✓ done     | Daubechies-4; `src/crest_bases.c`, 12 tests passing |
 | `morlet`              | `audio.basis.morlet`        | high     | to do      | Complex Gabor; onset transients |
 | `chirplet`            | `audio.basis.chirplet`      | high     | to do      | Linear-chirp Gaussian; cello body |
 | `gabor`               | `audio.basis.gabor`         | medium   | to do      | Real-valued Morlet; cheaper |
@@ -759,8 +759,10 @@ verifies their outputs match to within 1 ULP.
 
 6. **Repository migration timing.** ~~When does `lib/wavelet/` become
    `lib/crest/`?~~ Resolved 2026-05-21: directory renamed as part of
-   the Claude Code handoff migration. Internal file renames deferred
-   to crest_bases work session.
+   the Claude Code handoff migration. ~~Internal file renames deferred
+   to crest_bases work session.~~ Resolved 2026-05-21 (crest_bases
+   session): `wavelet.h` → `crest.h`, `wavelet.c` → `crest_core.c`,
+   `test_wavelet.c` → `test_crest_core.c`, `libwavelet.a` → `libcrest.a`.
 
 ---
 
