@@ -453,3 +453,67 @@ All five renames executed 2026-05-21 in one atomic migration commit:
   ideation, and design review. Claude Code owns code production,
   appends its own decision log entries, and maintains a diary. The
   repo is the canonical substrate; chat-project files are a snapshot.
+
+---
+
+## 2026-05-21 — SMOLA v0.3.1 decisions
+
+*(See `docs/smola_design.md` §2.13 for full spec.)*
+
+### String keywords: str, cstr, txt
+
+- **Source:** Claude Code session (smola_design.md v0.3.1 work).
+- **Affects:** `tools/smola/`, `docs/smola_design.md`.
+- **Decision:** Add three string-data keywords for use in data sections:
+  `str "…"` (bare byte string), `cstr "…"` (NUL-terminated), and
+  `txt`/`eot` (multi-line heredoc). All require a preceding label.
+  `.size` is emitted automatically. `str`/`cstr` support `\"`, `\\`,
+  `\n`, `\t`, `\0`, `\xHH` escapes. `txt` content is raw (no escape
+  processing; `\` and `"` are escaped for GAS automatically).
+- **Reasoning:** the wavelet and audio demos need string constants for
+  error messages, banners, and protocol tags. Inline string syntax is
+  far less error-prone than hand-writing `.ascii` + `.size`.
+
+### f16/bf16 stubs
+
+- **Source:** Claude Code session.
+- **Affects:** `tools/smola/`.
+- **Decision:** `f16`, `bf16`, and their `.s`/`.a` variants are added to
+  `SMOLA_KEYWORDS` so the lexer does not reject them as unknown. The
+  translator raises "not yet implemented" if they are used. This locks
+  in the keyword names before any demos use them as identifiers.
+
+### Sub-byte and exotic FP reserved keywords
+
+- **Source:** Claude Code session.
+- **Affects:** `tools/smola/`.
+- **Decision:** `fp8`, `fp4`, `i4`/`u4`, `i2`/`u2`, `i1`/`u1`,
+  `b1p58` (with `.s`/`.a`), and `packed` are reserved in
+  `SMOLA_KEYWORDS`. Using them raises "reserved — not yet implemented".
+  They are claimed now to prevent user code from relying on these
+  tokens for identifiers/labels.
+
+### txt lexer is stateful in lex_source, not lex_line
+
+- **Source:** Claude Code session.
+- **Affects:** `tools/smola/src/smola/lexer.py`.
+- **Decision:** `lex_line` remains stateless. `lex_source` holds a
+  `txt_active` bool and re-classifies txt-block interior lines as
+  `TXT_LINE` / `TXT_END`. The `txt` opener line is re-classified as
+  `TXT_BLOCK`. This keeps single-line classification simple and puts
+  the heredoc state where it belongs: the source-level pass.
+
+### _split_trailing_comment made quote-aware
+
+- **Source:** Claude Code session.
+- **Affects:** `tools/smola/src/smola/lexer.py`.
+- **Decision:** fixed to track an `in_str` flag so `#` and `//` inside
+  a double-quoted string are not treated as comment markers. Required
+  by `str`/`cstr` operands that contain `#` (e.g. URL fragments).
+
+### Version bump to 0.3.1
+
+- **Source:** Claude Code session.
+- **Affects:** `tools/smola/src/smola/__init__.py`.
+- **Decision:** bumped from `0.3.0` to `0.3.1`. Minor increment: adds
+  features, no source incompatibilities with v0.3.

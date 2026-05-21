@@ -18,8 +18,9 @@ Companion to SMOLR and smold.
 
 ## Version
 
-**v0.3.** Hard cut from v0.2: not source-compatible. See spec §10
-for the migration table.
+**v0.3.1.** Adds string data keywords (`str`, `cstr`, `txt`), stubs
+`f16`/`bf16`, and reserves the sub-byte/exotic-FP family. See spec
+§2.13 for details. Not source-incompatible with v0.3.
 
 ## At a glance
 
@@ -80,6 +81,11 @@ Closed vocabulary. Adding to it requires a spec amendment.
 | `f32`, `f64`      | Float variable declarations (precision explicit) |
 | `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64` | Width-typed integer declarations (documentation) |
 | `*.s`, `*.a`      | Storage variants (callee-saved, argument)     |
+| `str "…"`         | Bare byte string in a data section            |
+| `cstr "…"`        | NUL-terminated string in a data section       |
+| `txt` … `eot`     | Multi-line heredoc text block in a data section |
+| `f16`, `bf16`     | Half-precision float (stub — not yet implemented) |
+| `fp8`, `fp4`, `i4`/`u4`, `i2`/`u2`, `i1`/`u1`, `b1p58`, `packed` | Sub-byte / exotic FP (reserved) |
 | `zap`             | Release a binding                             |
 | `load_field`, `store_field`, `addr_field` | Struct field access   |
 | `raw`             | Escape hatch — emit the tail verbatim         |
@@ -140,6 +146,30 @@ each line.
 `int` and `vec` are forbidden in data sections — must commit to
 a width. `i8` through `u64`, `f32`, `f64`, and `ptr` are allowed.
 
+### String data
+
+```asm
+.section .rodata
+
+greeting:
+    str "Hello, world!"       # 13 bytes; no NUL
+
+prompt:
+    cstr "Enter name: "       # 13 bytes + NUL = 14
+
+banner:
+    txt
+line one of the banner
+line two of the banner
+eot
+```
+
+`str` emits `.ascii` with a `.size` sized to the UTF-8 byte count.
+`cstr` appends a `.byte 0` and counts +1. `txt` is a heredoc: every
+line until the `eot` terminator is emitted as `.ascii "…\n"`. Content
+inside `txt` is raw text — `\` and `"` are escaped for GAS
+automatically; no SMOLA escape sequences are processed.
+
 ## Collision detection
 
 Once SMOLA binds a name to a register, raw references to that
@@ -168,7 +198,7 @@ src/smola/              # the Python package
     cli.py
     errors.py
 src/bin/smola           # executable entry point
-tests/                  # 89 unit tests + pytest-free runner
+tests/                  # 173 unit tests + pytest-free runner
 examples/               # ported v0.3 examples
 Makefile
 README.md
@@ -184,17 +214,21 @@ make check-assembles       # requires riscv64-linux-gnu-as
 
 ## Status
 
-v0.3 implemented:
+v0.3.1 implemented:
 
 - mnemonic table covers RVA23-mandatory extensions
 - all syntax constructs from the spec
 - comment transfer from source to .s
 - auto-generated bindings table per function
-- 89 unit tests passing on host
+- string data: `str`, `cstr`, `txt`/`eot`
+- f16/bf16 stubs (keyword accepted, "not yet implemented" error)
+- sub-byte/exotic FP reserved keywords (keyword accepted, reserved error)
+- 173 unit tests passing on host
 
 Not yet:
 
 - assembly verification with the cross toolchain (next milestone)
+- f16/bf16 implementation
 - anonymous temporaries (syntax reserved; semantics for v0.4)
 - curated `_v.*` RVV vocabulary (planned v0.4)
 - soft-float ABI

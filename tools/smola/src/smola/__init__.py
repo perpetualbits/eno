@@ -4,4 +4,4 @@ v0.3 — content-classified syntax with strict typo detection. See
 spec/Smola_Spec.md for the language definition.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

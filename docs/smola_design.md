@@ -2,8 +2,9 @@
 
 ## Status
 
-Design document v0.3. Implementation prototype at `tools/smola/` in the
-ENO monorepo. Hard cut from v0.2 (no source compatibility). Companion
+Design document v0.3.1. Implementation at `tools/smola/` in the ENO
+monorepo. v0.3.1 adds string data keywords; not source-incompatible
+with v0.3. Hard cut from v0.2 (no source compatibility). Companion
 to SMOLR and smold; see `Smolr_Design_And_Plan.md` and
 `Smolr_Embedded_Disassembler_Design.md` for the linker and disassembler
 this lives alongside.
@@ -18,7 +19,8 @@ recognizes lines by what they are:
 - a known RVA23 / RISC-V instruction
 - a known GAS directive (starts with `.`)
 - a SMOLA keyword (small closed list: `func`, `end`, `scope`, `endscope`,
-  `struct`, `stack`, `int`, `ptr`, `flt`, `vec`, `zap`)
+  `struct`, `stack`, `int`, `ptr`, `vec`, `zap`, `str`, `cstr`, `txt`,
+  and the full width/float/reserved family — see §2.3)
 - a label (`<ident>:` or `.L<name>:`)
 - a comment (`#` or `//`)
 - a blank line
@@ -414,7 +416,7 @@ Anything on a `raw` line passes through verbatim with no checks (not
 even collision detection — `raw` is a deliberate hatch). Provenance
 comment notes the rawness.
 
-### 2.11 What v0.3 does NOT have
+### 2.11 What v0.3 / v0.3.1 does NOT have
 
 - Inheritance, generics, virtual dispatch.
 - Anonymous declarations in code or data (§2.5 reserved syntax).
@@ -428,6 +430,10 @@ comment notes the rawness.
 - The curated `_v.*` RVV vocabulary mentioned in v0.2's milestone list.
   Raw RVV instructions pass through cleanly; the vocabulary lands when
   a concrete wavelet kernel needs it.
+- `f16` / `bf16` implementation (keywords reserved; translator raises
+  "not yet implemented" — see §2.13).
+- Sub-byte / exotic FP types (`fp8`, `fp4`, `i4`/`u4`, `i2`/`u2`,
+  `i1`/`u1`, `b1p58`, `packed`): reserved keywords, see §2.13.
 
 ### 2.12 Data-section declarations
 
@@ -589,6 +595,89 @@ func use_it
 ```
 
 emits `.size data, 4` *before* the `.section .text` directive.
+
+### 2.13 String data (v0.3.1)
+
+Three new keywords declare string content directly in a data section.
+They require a preceding label (anonymous strings are reserved).
+All three emit `.balign 1` because byte strings need no alignment
+beyond byte granularity.
+
+#### `str "…"` — bare byte string
+
+```asm
+greeting:
+    str "Hello, world!"
+```
+
+Emits:
+```
+greeting:
+    .balign 1
+    .ascii "Hello, world!"
+    .size greeting, 13
+```
+
+`.size` equals the UTF-8 byte count. No NUL terminator is appended.
+Use when the caller knows the length from context (e.g. via a
+companion `.word` length field, or a fixed-size protocol).
+
+#### `cstr "…"` — NUL-terminated string
+
+```asm
+prompt:
+    cstr "Enter name: "
+```
+
+Emits `.ascii` followed by `.byte 0`. `.size` counts the NUL byte:
+`prompt` is 13 bytes (12 chars + NUL).
+
+#### `txt` … `eot` — multi-line heredoc
+
+```asm
+banner:
+    txt
+line one
+line two
+eot
+```
+
+Emits one `.ascii "…\n"` per content line. `eot` must appear on its
+own line. Content is raw: `\` and `"` characters are automatically
+escaped for GAS; SMOLA escape sequences (like `\n`) are **not**
+processed inside the block. Total size equals Σ(UTF-8 bytes per
+line + 1 for the newline).
+
+#### Supported escape sequences (str and cstr only)
+
+| Sequence | Meaning        |
+|----------|----------------|
+| `\"`     | double-quote   |
+| `\\`     | backslash      |
+| `\n`     | newline (0x0A) |
+| `\t`     | tab (0x09)     |
+| `\0`     | NUL (0x00)     |
+| `\xHH`   | hex byte       |
+
+Unknown escapes are an error.
+
+#### Context requirement
+
+`str`, `cstr`, and `txt` are only valid in a data section. Using
+them in `.text` (or before any `.section`) is an error.
+
+#### f16 / bf16 (stub)
+
+`f16`, `bf16`, and their `.s`/`.a` storage variants are in the
+keyword set so the lexer does not reject them as unknown mnemonics.
+The translator raises a "not yet implemented" error if they appear.
+They will be implemented in a future release.
+
+#### Sub-byte and exotic FP (reserved)
+
+`fp8`, `fp4`, `i4`, `u4`, `i2`, `u2`, `i1`, `u1`, `b1p58` (each
+with `.s`/`.a`), and `packed` are reserved keywords. They are in the
+keyword set and produce a "reserved — not yet implemented" error.
 
 ## 3. Worked example
 

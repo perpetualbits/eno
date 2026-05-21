@@ -311,6 +311,11 @@ class Translator:
         # keyword) — the keyword preserved for diagnostics.
         self.pending_data_type: Optional[Tuple[str, int, int, str]] = None
 
+        # txt-block state. When non-None, we are inside an open txt
+        # heredoc block; the list accumulates raw content lines.
+        self.txt_in_progress: Optional[List[str]] = None
+        self.txt_start_loc: Optional[SourceLoc] = None
+
     # ----- entry point -----
 
     def translate(self, source: str) -> str:
@@ -326,6 +331,12 @@ class Translator:
         self._flush_pending_comments(target="output")
         # Any open data block at EOF gets its .size flushed.
         self._flush_data_label_size()
+        if self.txt_in_progress is not None:
+            raise ParseError(
+                self.txt_start_loc,
+                "unterminated txt block (missing `eot`)",
+                hint="add `eot` on its own line to close the txt block",
+            )
         if self.current_func is not None:
             raise FrameError(
                 self.current_func.declared_at,
@@ -337,6 +348,15 @@ class Translator:
     # ----- line dispatch -----
 
     def _process_line(self, line: Line) -> None:
+        # txt heredoc interior lines bypass all comment-flush logic —
+        # the lexer already classified them in stateful mode.
+        if line.kind == LineKind.TXT_LINE:
+            self._handle_txt_line(line)
+            return
+        if line.kind == LineKind.TXT_END:
+            self._handle_txt_end(line)
+            return
+
         # Comments accumulate in the pending buffer regardless of
         # what's coming next — flush behavior depends on the next
         # non-comment line.
@@ -390,6 +410,15 @@ class Translator:
             return
         if line.kind == LineKind.DATA_VALUES:
             self._handle_data_values(line)
+            return
+        if line.kind == LineKind.TXT_BLOCK:
+            self._handle_txt_block(line)
+            return
+        if line.kind == LineKind.TXT_LINE:
+            self._handle_txt_line(line)
+            return
+        if line.kind == LineKind.TXT_END:
+            self._handle_txt_end(line)
             return
 
         # Shouldn't reach here — every LineKind is handled above.
@@ -630,6 +659,43 @@ class Translator:
         if head == "addr_field":
             self._handle_addr_field(line)
             return
+
+        # String data keywords.
+        if head == "str":
+            self._handle_str_decl(line)
+            return
+        if head == "cstr":
+            self._handle_cstr_decl(line)
+            return
+        # txt is handled as TXT_BLOCK by _process_line directly; it
+        # should never reach here as a plain SMOLA line.
+
+        # f16 / bf16 — declared but not yet implemented.
+        _f16_bases = {"f16", "bf16"}
+        if head.split('.')[0] in _f16_bases:
+            raise ParseError(
+                line.loc,
+                f"`{head}` is not yet implemented",
+                hint=(
+                    "f16 and bf16 support is planned for a future SMOLA "
+                    "release; use f32 or f64 for now"
+                ),
+            )
+
+        # Sub-byte and exotic FP reserved keywords.
+        _reserved_bases = {
+            "fp8", "fp4", "i4", "u4", "i2", "u2", "i1", "u1",
+            "b1p58", "packed",
+        }
+        if head.split('.')[0] in _reserved_bases:
+            raise ParseError(
+                line.loc,
+                f"`{head}` is a reserved keyword (not yet implemented)",
+                hint=(
+                    "sub-byte and exotic FP types are reserved for a future "
+                    "SMOLA release"
+                ),
+            )
 
         # Raw escape hatch.
         if head == "raw":
@@ -1319,6 +1385,229 @@ class Translator:
         # Replace commas with spaces, then whitespace-split.
         cleaned = text.replace(',', ' ')
         return [tok for tok in cleaned.split() if tok]
+
+    # ----- string data (str / cstr / txt) -----
+
+    @staticmethod
+    def _encode_for_gas(content: str) -> str:
+        """Encode a decoded Python string as a GAS .ascii literal body.
+
+        Converts control characters and special chars back to GAS-safe
+        escape sequences. The result is suitable for embedding between
+        the double quotes of a `.ascii "..."` directive.
+        """
+        parts = []
+        for ch in content:
+            if ch == '\\':
+                parts.append('\\\\')
+            elif ch == '"':
+                parts.append('\\"')
+            elif ch == '\n':
+                parts.append('\\n')
+            elif ch == '\t':
+                parts.append('\\t')
+            elif ch == '\0':
+                parts.append('\\000')
+            elif ch == '\r':
+                parts.append('\\r')
+            elif ord(ch) < 32 or ord(ch) == 127:
+                parts.append(f'\\{ord(ch):03o}')
+            else:
+                parts.append(ch)
+        return ''.join(parts)
+
+    @staticmethod
+    def _parse_quoted_string(tail: str, loc: SourceLoc,
+                             keyword: str) -> Tuple[str, int]:
+        """Parse a double-quoted string from `tail`.
+
+        Returns (content, byte_count) where content is the decoded
+        string value and byte_count is the number of UTF-8 bytes it
+        occupies (not counting any NUL terminator — callers add that
+        themselves for cstr).
+
+        Supported escapes: \\", \\\\, \\n, \\t, \\0, \\xHH.
+        Any other escape is an error.
+
+        Trailing content after the closing `"` is rejected.
+        """
+        s = tail.strip()
+        if not s.startswith('"'):
+            raise ParseError(
+                loc,
+                f"`{keyword}` operand must be a double-quoted string",
+                hint=f'example: {keyword} greeting "Hello, world!"',
+            )
+        i = 1  # skip opening quote
+        chars: List[str] = []
+        while i < len(s):
+            ch = s[i]
+            if ch == '"':
+                # Closing quote found.
+                rest = s[i + 1:].strip()
+                if rest:
+                    raise ParseError(
+                        loc,
+                        f"unexpected content after closing quote: {rest!r}",
+                    )
+                content = "".join(chars)
+                byte_count = len(content.encode('utf-8'))
+                return content, byte_count
+            if ch == '\\':
+                if i + 1 >= len(s):
+                    raise ParseError(loc, "backslash at end of string")
+                esc = s[i + 1]
+                if esc == '"':
+                    chars.append('"'); i += 2; continue
+                if esc == '\\':
+                    chars.append('\\'); i += 2; continue
+                if esc == 'n':
+                    chars.append('\n'); i += 2; continue
+                if esc == 't':
+                    chars.append('\t'); i += 2; continue
+                if esc == '0':
+                    chars.append('\0'); i += 2; continue
+                if esc == 'x':
+                    if i + 3 >= len(s):
+                        raise ParseError(
+                            loc, r"incomplete \xHH escape sequence",
+                        )
+                    hex_str = s[i + 2:i + 4]
+                    try:
+                        chars.append(chr(int(hex_str, 16)))
+                    except ValueError:
+                        raise ParseError(
+                            loc,
+                            rf"invalid hex escape \x{hex_str!r}",
+                        )
+                    i += 4; continue
+                raise ParseError(
+                    loc,
+                    rf"unknown escape sequence \{esc!r}",
+                    hint=r"supported: \", \\, \n, \t, \0, \xHH",
+                )
+            chars.append(ch)
+            i += 1
+        raise ParseError(loc, "unterminated string literal (missing closing \")")
+
+    def _require_data_section_for_string(self, loc: SourceLoc,
+                                         keyword: str) -> None:
+        if not _is_data_section(self.current_section):
+            raise ParseError(
+                loc,
+                f"`{keyword}` is only valid in a data section",
+                hint=(
+                    "add `.section .rodata` or `.section .data` "
+                    "before using string declarations"
+                ),
+            )
+
+    def _handle_str_decl(self, line: Line) -> None:
+        """Handle `str <label_or_quoted> "<content>"`.
+
+        Syntax (in a data section):
+            <label>:
+                str "content"
+
+        Emits:
+            .balign 1
+            .ascii "<content>"
+            # .size is emitted by _flush_data_label_size via the
+            # current_data_label_bytes counter.
+        """
+        self._require_data_section_for_string(line.loc, "str")
+        if self.current_data_label is None:
+            raise ParseError(
+                line.loc,
+                "`str` requires a preceding label",
+                hint="add a label on the line before `str`",
+            )
+        content, byte_count = self._parse_quoted_string(
+            line.tail, line.loc, "str"
+        )
+        gas_content = self._encode_for_gas(content)
+        self.output_lines.append("    .balign 1")
+        self.output_lines.append(f'    .ascii "{gas_content}"')
+        self.current_data_label_bytes += byte_count
+        if line.trailing_comment:
+            self.output_lines[-1] += f"    {line.trailing_comment}"
+        self.pending_data_type = None
+
+    def _handle_cstr_decl(self, line: Line) -> None:
+        """Handle `cstr "content"` — NUL-terminated string.
+
+        Like `str` but appends a `.byte 0` and counts +1 byte.
+        """
+        self._require_data_section_for_string(line.loc, "cstr")
+        if self.current_data_label is None:
+            raise ParseError(
+                line.loc,
+                "`cstr` requires a preceding label",
+                hint="add a label on the line before `cstr`",
+            )
+        content, byte_count = self._parse_quoted_string(
+            line.tail, line.loc, "cstr"
+        )
+        gas_content = self._encode_for_gas(content)
+        self.output_lines.append("    .balign 1")
+        self.output_lines.append(f'    .ascii "{gas_content}"')
+        self.output_lines.append("    .byte 0")
+        self.current_data_label_bytes += byte_count + 1
+        if line.trailing_comment:
+            self.output_lines[-2] += f"    {line.trailing_comment}"
+        self.pending_data_type = None
+
+    def _handle_txt_block(self, line: Line) -> None:
+        """Handle the opening `txt <label_name>` line of a heredoc block.
+
+        The label must already have been emitted via a preceding
+        `<label>:` line.  Content lines follow until `eot`.
+        """
+        self._require_data_section_for_string(line.loc, "txt")
+        if self.current_data_label is None:
+            raise ParseError(
+                line.loc,
+                "`txt` requires a preceding label",
+                hint="add a label on the line before `txt`",
+            )
+        if self.txt_in_progress is not None:
+            raise ParseError(
+                line.loc, "nested txt blocks are not allowed",
+            )
+        self.txt_in_progress = []
+        self.txt_start_loc = line.loc
+        self.pending_data_type = None
+
+    def _handle_txt_line(self, line: Line) -> None:
+        """Accumulate one content line inside a txt block."""
+        if self.txt_in_progress is None:
+            raise ParseError(
+                line.loc,
+                "TXT_LINE seen outside a txt block (internal error)",
+            )
+        self.txt_in_progress.append(line.tail)
+
+    def _handle_txt_end(self, line: Line) -> None:
+        """Emit the accumulated txt block content and close the block."""
+        if self.txt_in_progress is None:
+            raise ParseError(
+                line.loc,
+                "`eot` without a matching `txt` block",
+                hint="remove stray `eot` or open a `txt` block first",
+            )
+        lines = self.txt_in_progress
+        self.txt_in_progress = None
+        self.txt_start_loc = None
+
+        total_bytes = 0
+        for content_line in lines:
+            gas_content = (content_line
+                           .replace('\\', '\\\\')
+                           .replace('"', '\\"'))
+            self.output_lines.append(f'    .ascii "{gas_content}\\n"')
+            total_bytes += len(content_line.encode('utf-8')) + 1  # +1 for \n
+        self.current_data_label_bytes += total_bytes
+        self.pending_data_type = None
 
     # ----- zap -----
 

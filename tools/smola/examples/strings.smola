@@ -1,0 +1,38 @@
+// strings.smola — SMOLA v0.3.1 string data example.
+// Demonstrates str, cstr, and txt in a .rodata section.
+
+.section .rodata
+
+// str: bare byte string (no NUL terminator).
+// Use when the length is known from context.
+hello_len:
+    .word 13
+
+hello:
+    str "Hello, world!"
+
+// cstr: NUL-terminated string (C-compatible).
+// .size counts the NUL byte.
+prompt:
+    cstr "Enter your name: "
+
+// Escape sequences: \n, \t, \\, \", \0, \xHH
+escaped:
+    cstr "line1\nline2\ttabbed\n"
+
+// txt: multi-line heredoc block.
+// Each content line gets an implicit \n appended.
+// Backslash and double-quote in content are escaped for GAS.
+// Everything between txt and eot is literal — no escape processing.
+banner:
+    txt
+  _____ _   _  ___
+ | ____| \ | |/ _ \
+ |  _| |  \| | | | |
+ | |___| |\  | |_| |
+ |_____|_| \_|\___/
+eot
+
+// Multiple labels in one section — each gets its own .size.
+version_str:
+    cstr "0.3.1"

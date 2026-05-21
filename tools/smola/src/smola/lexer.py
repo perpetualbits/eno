@@ -125,6 +125,31 @@ def _build_keywords() -> frozenset:
     out.add("vec")
     out.add("vec.a")
 
+    # String data keywords.
+    out.update({"str", "cstr", "txt"})
+
+    # f16 / bf16 — declared but not yet implemented. The translator
+    # raises a "not yet implemented" error if they appear; they are in
+    # the keyword set so the lexer doesn't reject them as unknown.
+    for kw in ["f16", "bf16"]:
+        out.add(kw)
+        out.add(f"{kw}.s")
+        out.add(f"{kw}.a")
+
+    # Sub-byte and exotic FP reserved keywords. Present in the keyword
+    # set so the lexer passes them through; the translator raises a
+    # "reserved — not yet implemented" error.
+    sub_byte = [
+        "fp8", "fp4",
+        "i4", "u4", "i2", "u2", "i1", "u1",
+        "b1p58",
+    ]
+    for kw in sub_byte:
+        out.add(kw)
+        out.add(f"{kw}.s")
+        out.add(f"{kw}.a")
+    out.add("packed")
+
     return frozenset(out)
 
 
@@ -154,8 +179,12 @@ class LineKind(Enum):
     as a strict-typo error by the translator (with the same kind of
     "unknown mnemonic" diagnostic the lexer would have produced).
 
+    TXT_BLOCK, TXT_LINE, and TXT_END are assigned only by lex_source()
+    during its stateful pass over a txt…eot heredoc block. lex_line()
+    never produces these; they are a multi-line construct.
+
     This split (lexer recognizes shape, translator owns semantics)
-    keeps the lexer stateless across lines.
+    keeps single-line classification stateless.
     """
     BLANK = "blank"             # empty / whitespace
     COMMENT = "comment"         # `#` or `//` line
@@ -165,6 +194,9 @@ class LineKind(Enum):
     RV_INSN = "rv_insn"         # first token is a known RV mnemonic
     DATA_VALUES = "data_values" # first token is a numeric literal
                                 # (only valid as data continuation)
+    TXT_BLOCK = "txt_block"     # the `txt <label>` opening line
+    TXT_LINE  = "txt_line"      # a raw content line inside a txt block
+    TXT_END   = "txt_end"       # the `eot` terminator line
 
 
 @dataclass
@@ -203,21 +235,29 @@ def _split_trailing_comment(text: str) -> tuple[str, str]:
     Returns (body_before_comment, comment_with_marker). Returns
     (text, "") if there's no comment.
 
-    Simple scan: walk for the earliest `#` or `//`. Safe because v0.3
-    has no string literals in operands.
+    Quote-aware: `#` and `//` inside a double-quoted string are not
+    treated as comment markers. This is required now that str/cstr/txt
+    operands can contain those characters.
     """
-    h = text.find('#')
-    s = text.find('//')
-    cut = -1
-    if h >= 0 and s >= 0:
-        cut = min(h, s)
-    elif h >= 0:
-        cut = h
-    elif s >= 0:
-        cut = s
-    if cut < 0:
-        return text, ""
-    return text[:cut].rstrip(), text[cut:]
+    i = 0
+    in_str = False
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == '#':
+                return text[:i].rstrip(), text[i:]
+            elif ch == '/' and i + 1 < len(text) and text[i + 1] == '/':
+                return text[:i].rstrip(), text[i:]
+        i += 1
+    return text, ""
 
 
 def _is_ident(s: str) -> bool:
@@ -400,14 +440,48 @@ def _looks_like_numeric_literal(s: str) -> bool:
     return False
 
 
+def _lex_txt_line(filename: str, line_no: int, raw: str) -> Line:
+    """Classify one line *inside* an active txt block.
+
+    The line is either the `eot` terminator or a raw content line.
+    Content lines are never classified further — they are passed
+    through verbatim. Comments are NOT stripped: everything up to the
+    newline is literal data.
+    """
+    line_text = raw.rstrip('\n').rstrip('\r')
+    loc = SourceLoc(filename=filename, line_no=line_no, line_text=line_text)
+    if line_text.strip() == "eot":
+        return Line(loc=loc, kind=LineKind.TXT_END, head="eot")
+    return Line(loc=loc, kind=LineKind.TXT_LINE, tail=line_text)
+
+
 def lex_source(filename: str, text: str) -> List[Line]:
     """Lex an entire source string, one Line per input line.
 
     Blanks and comments are preserved (not filtered) because the
     translator re-emits them — comment transfer to the generated `.s`
     requires keeping them in the stream.
+
+    Stateful for txt blocks: once a `txt` SMOLA line is seen, all
+    subsequent lines are classified by _lex_txt_line() until `eot` is
+    encountered. The opening `txt` line itself is re-classified as
+    TXT_BLOCK so the translator can distinguish it from a bare SMOLA
+    dispatch.
     """
-    return [
-        lex_line(filename, i, raw)
-        for i, raw in enumerate(text.splitlines(), start=1)
-    ]
+    lines: List[Line] = []
+    txt_active = False
+    for i, raw in enumerate(text.splitlines(), start=1):
+        if txt_active:
+            line = _lex_txt_line(filename, i, raw)
+            lines.append(line)
+            if line.kind == LineKind.TXT_END:
+                txt_active = False
+        else:
+            line = lex_line(filename, i, raw)
+            if line.kind == LineKind.SMOLA and line.head == "txt":
+                line = Line(loc=line.loc, kind=LineKind.TXT_BLOCK,
+                            head=line.head, tail=line.tail,
+                            trailing_comment=line.trailing_comment)
+                txt_active = True
+            lines.append(line)
+    return lines
