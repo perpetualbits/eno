@@ -1,42 +1,67 @@
-"""SMOLA translator.
+"""SMOLA v0.3 translator.
 
-Top-level orchestration:
-  - lex the source
-  - walk lines, maintaining global state (symbol table) and per-function
-    state (allocator, body buffer, frame info)
-  - on .smola.endfunc, run the frame planner and stitch prologue +
-    body + epilogue together
+Orchestrates the pipeline:
+  - lex source -> Line stream
+  - walk Lines, maintaining symbol table, allocator, scope stack,
+    per-function buffer, and a pending-comment buffer
+  - at `end`, plan the frame and stitch:
+      header -> prologue -> bindings table -> body -> epilogue
   - emit a complete .s file
 
-The translator is stateful but linear: it walks lines in order. No
-look-ahead, no backtracking. The buffered body is rewritten only by
-prepending the prologue.
+Major v0.3 changes from v0.2:
+  - Discriminator is content-based, not prefix-based. Lexer already
+    handles this; the translator dispatches on LineKind.
+  - Variable declarations are bare type keywords (`int counter`)
+    instead of `_var.t int counter`. Storage-class suffixes
+    (`int.s`, `int.a`) used for non-default storage.
+  - Initialization shorthand: `int counter 10` declares and emits
+    `li`. `flt gain 0.75` declares and emits the appropriate float-
+    immediate sequence.
+  - Comments transfer to the generated .s. Block comments above a
+    func go before the function header. Block comments inside the
+    function go in body order. End-of-line comments attach to the
+    instruction they document.
+  - Auto-generated bindings table at the top of each function lists
+    every variable and its register.
+  - `zap` replaces v0.2's `_free`. `end` replaces `_endfunc` /
+    `_endmethod`. `func Foo.bar` does method-detection automatically.
 """
 
 import re
+import struct as _struct  # avoid name clash with our `struct` keyword
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from . import __version__
-from .errors import (FrameError, LexError, ParseError, RegAllocError,
-                     SmolaError, SourceLoc, StructError)
+from .errors import (CollisionError, FrameError, ParseError,
+                     RegAllocError, SmolaError, SourceLoc, StructError)
 from .frame import FramePlan, emit_epilogue, emit_prologue, plan_frame
 from .lexer import Line, LineKind, lex_source
-from .regalloc import Allocator, RegKind, normalize_reg
-from .symbols import StructDef, SymbolTable, define_struct
+from .regalloc import (Allocator, Binding, Storage, VarType,
+                       is_register_name, normalize_reg)
+from .symbols import SymbolTable, define_struct
 
 
-# Regex for parsing memory operands like "0(self)" or "-4(sp)".
-_MEM_OPERAND_RE = re.compile(r'^\s*([+-]?(?:0x[0-9a-fA-F]+|\d+|[A-Za-z_][\w]*))\s*\(\s*([A-Za-z_]\w*)\s*\)\s*$')
+# Regex for `imm(reg)` memory operands. Imm is optional (atomics use
+# `(rs1)` with no offset; the regex makes it optional and we default
+# to "0" at emission time).
+_MEM_OPERAND_RE = re.compile(
+    r'^\s*([+-]?(?:0x[0-9a-fA-F]+|\d+|[A-Za-z_][\w]*))?'
+    r'\s*\(\s*([A-Za-z_]\w*)\s*\)\s*$'
+)
+
+# Pattern for identifying register tokens inside raw assembly lines.
+# Used by the collision detector to scan a passthrough line for any
+# token that might be a register reference.
+_TOKEN_RE = re.compile(r'[A-Za-z_]\w*')
 
 
 def _split_operands(tail: str) -> List[str]:
-    """Split a comma-separated operand list, respecting parens.
+    """Comma-split operands, respecting parens.
 
-    Examples:
-        "a, b, c"          -> ["a", "b", "c"]
-        "x, 0(self)"       -> ["x", "0(self)"]
-        ""                  -> []
+    `"a, b, 0(sp)"` -> `["a", "b", "0(sp)"]`. Tracks paren depth so
+    commas inside memory operands aren't split on (none exist in
+    standard syntax, but the depth tracking is harmless).
     """
     if tail.strip() == "":
         return []
@@ -60,9 +85,78 @@ def _split_operands(tail: str) -> List[str]:
     return [p for p in parts if p]
 
 
+def _looks_like_immediate(s: str) -> bool:
+    """Heuristic: does this token look like a numeric immediate or
+    local label?
+
+    Recognizes:
+      - integers: 42, -5, 0xDEAD, +1
+      - floats: 0.5, 1e3, -1.5e-10
+      - local labels: anything starting with `.`
+    """
+    s = s.strip()
+    if not s:
+        return False
+    rest = s[1:] if s[0] in '-+' else s
+    if rest.startswith('0x') or rest.startswith('0X'):
+        return all(c in '0123456789abcdefABCDEF' for c in rest[2:])
+    if rest and (rest[0].isdigit() or rest[0] == '.'):
+        try:
+            float(rest)
+            return True
+        except ValueError:
+            pass
+    # Local labels start with `.` (e.g. `.Ldone`).
+    if s.startswith('.'):
+        return True
+    return False
+
+
+def _parse_var_keyword(keyword: str) -> Tuple[VarType, Storage]:
+    """Parse a SMOLA variable keyword like `int`, `int.s`, `flt.a`,
+    `f32`, `f64.s` into a (VarType, Storage) pair.
+
+    Default storage is T (caller-saved temporary). The `f32` / `f64`
+    forms are treated as `flt` for allocation purposes; the precision
+    distinction affects only initialization emission.
+    """
+    # Split off any storage suffix.
+    base, _, suffix = keyword.partition('.')
+
+    # The base maps to a VarType. f32/f64 share the flt pool.
+    type_map = {
+        "int": VarType.INT,
+        "ptr": VarType.PTR,
+        "flt": VarType.FLT,
+        "f32": VarType.FLT,
+        "f64": VarType.FLT,
+        "vec": VarType.VEC,
+    }
+    if base not in type_map:
+        # Shouldn't reach here — the lexer's SMOLA_KEYWORDS check
+        # already filtered.
+        raise ParseError(
+            None, f"unknown variable type keyword {keyword!r}",
+        )
+    var_type = type_map[base]
+
+    if suffix == "":
+        storage = Storage.T
+    elif suffix == "s":
+        storage = Storage.S
+    elif suffix == "a":
+        storage = Storage.A
+    else:
+        raise ParseError(
+            None, f"unknown storage suffix .{suffix!r}",
+            hint="use .s for callee-saved or .a for argument",
+        )
+    return var_type, storage
+
+
 @dataclass
 class FuncCtx:
-    """Per-function state. Created at .smola.func, destroyed at .smola.endfunc."""
+    """Per-function state. Created at `func`, finalized at `end`."""
     name: str
     is_global: bool
     declared_at: SourceLoc
@@ -70,158 +164,330 @@ class FuncCtx:
     body_lines: List[str] = field(default_factory=list)
     calls_other: bool = False
     user_spill_bytes: int = 0
-    # Header lines that were emitted at .smola.func time (section,
-    # globl, type, balign, label). The prologue gets inserted AFTER
-    # these but BEFORE the body.
     header_lines: List[str] = field(default_factory=list)
-    # Trailer: .size directive emitted at endfunc time.
+    # Block comments that appeared before this function in source.
+    # Emitted into the .s immediately before the function header.
+    leading_comments: List[str] = field(default_factory=list)
+    # Float-init literal pool entries — bit patterns to emit at the
+    # end of the function's section. Used for f64 initialization.
+    flt_pool: List[Tuple[str, int]] = field(default_factory=list)
+    # Counter for unique labels within the function (for flt pool
+    # entries, etc.).
+    label_counter: int = 0
+    # Set of label names declared in this function. Populated as
+    # `<name>:` lines are processed. Used by operand resolution to
+    # recognize branch targets that don't start with `.`.
+    declared_labels: set = field(default_factory=set)
 
 
 class Translator:
-    """Translates a SMOLA source string into a GAS .s source string."""
+    """The full SMOLA translator. Owns the symbol table, output
+    buffer, and current-function state."""
 
-    def __init__(self, filename: str = "<input>", emit_provenance: bool = True):
+    def __init__(self, filename: str = "<input>",
+                 emit_provenance: bool = True):
         self.filename = filename
         self.emit_provenance = emit_provenance
         self.symbols = SymbolTable()
         self.current_func: Optional[FuncCtx] = None
-        # All output, in order, fully formed.
+        # All output, fully formed, in order.
         self.output_lines: List[str] = []
+        # Buffer for block comments not yet attached to a destination.
+        # Flushed when a non-comment line arrives, or attached to the
+        # next `func`.
+        self.pending_comments: List[str] = []
 
-    # ----- public entry -----
+    # ----- entry point -----
 
     def translate(self, source: str) -> str:
+        """Translate a full SMOLA source string to a .s string."""
         self._emit_file_header()
-        # Pre-pass: fold multi-line .smola.struct declarations into one
-        # line before lexing. This avoids the lexer trying to interpret
-        # the inner "field: type," lines as labels.
+        # Fold multi-line struct declarations so the inner field lines
+        # don't get lexed as labels.
         source = _fold_multiline_structs(source)
-        lines = lex_source(self.filename, source)
-        for line in lines:
+        for line in lex_source(self.filename, source):
             self._process_line(line)
-
+        # Any trailing pending comments at EOF flush as top-level
+        # output.
+        self._flush_pending_comments(target="output")
         if self.current_func is not None:
             raise FrameError(
                 self.current_func.declared_at,
                 f"function {self.current_func.name!r} was never closed",
-                hint="add a matching .smola.endfunc or .smola.endmethod",
+                hint="add a matching `end` directive",
             )
-
         return "\n".join(self.output_lines) + "\n"
 
     # ----- line dispatch -----
 
     def _process_line(self, line: Line) -> None:
-        if line.kind == LineKind.BLANK:
-            self._emit_to_current("")
-            return
-
+        # Comments accumulate in the pending buffer regardless of
+        # what's coming next — flush behavior depends on the next
+        # non-comment line.
         if line.kind == LineKind.COMMENT:
-            # Normalize // -> # for GAS.
-            text = line.tail
-            if text.startswith('//'):
-                text = '#' + text[2:]
-            self._emit_to_current(text)
+            self.pending_comments.append(line.tail)
             return
 
-        if line.kind == LineKind.PASSTHROUGH:
-            self._emit_to_current(line.tail)
+        if line.kind == LineKind.BLANK:
+            # Blanks within a comment block stay attached to the
+            # block; we represent them as empty lines in the pending
+            # buffer so the structure is preserved on flush.
+            if self.pending_comments:
+                self.pending_comments.append("")
+            else:
+                self._emit_to_current("")
             return
 
-        if line.kind == LineKind.SMOLA_DIRECTIVE:
-            self._handle_smola_directive(line)
-            return
-
-        if line.kind == LineKind.GAS_DIRECTIVE:
-            self._emit_to_current(self._format_passthrough(line))
-            return
+        # Any other line ends the comment block. Decide where the
+        # comments go: if the next line is a `func`, attach them to
+        # the function so they emit before its section header.
+        # Otherwise flush them at the current position.
+        if line.kind == LineKind.SMOLA and line.head == "func":
+            # The func handler will attach pending_comments to the
+            # FuncCtx and clear the buffer.
+            pass
+        else:
+            self._flush_pending_comments(target="auto")
 
         if line.kind == LineKind.LABEL:
-            self._emit_to_current(f"{line.head}:" + self._fmt_trail(line))
+            self._handle_label(line)
+            return
+        if line.kind == LineKind.GAS_DIRECTIVE:
+            self._handle_gas_directive(line)
+            return
+        if line.kind == LineKind.RV_INSN:
+            self._handle_rv_insn(line)
+            return
+        if line.kind == LineKind.SMOLA:
+            self._handle_smola(line)
             return
 
-        if line.kind == LineKind.INSN_RAW:
-            # Track if it's a call so the frame planner knows.
-            if line.head in ("call", "jal", "tail"):
-                if self.current_func is not None:
-                    # 'jal ra, target' implies ra-clobber; 'jal x0, target'
-                    # does not. Be conservative: any jal counts.
-                    self.current_func.calls_other = True
-            self._emit_to_current(self._format_passthrough(line))
-            return
-
-        if line.kind == LineKind.INSN_SMOLA:
-            self._handle_smola_insn(line)
-            return
-
+        # Shouldn't reach here — every LineKind is handled above.
         raise ParseError(line.loc, f"unhandled line kind {line.kind}")
 
-    # ----- SMOLA directive handling -----
+    # ----- pending-comment management -----
 
-    def _handle_smola_directive(self, line: Line) -> None:
-        head = line.head
-        if head in ("func", "method"):
-            self._open_func(line, is_method=(head == "method"))
-        elif head in ("endfunc", "endmethod"):
-            self._close_func(line)
-        elif head == "struct":
-            self._declare_struct(line)
-        elif head == "stack":
-            self._set_user_spill(line)
+    def _flush_pending_comments(self, target: str) -> None:
+        """Move buffered comments to the output.
+
+        `target` is one of:
+          - "output": top-level output stream (before any function or
+            between functions)
+          - "current": inside the current function's body buffer
+          - "auto": pick based on whether we're inside a function
+        """
+        if not self.pending_comments:
+            return
+        if target == "auto":
+            target = "current" if self.current_func is not None else "output"
+        # Normalize `//` to `#` for GAS.
+        normalized = []
+        for line in self.pending_comments:
+            if line.startswith('//'):
+                normalized.append('#' + line[2:])
+            else:
+                normalized.append(line)
+        if target == "current":
+            self.current_func.body_lines.extend(normalized)
         else:
-            raise ParseError(
-                line.loc,
-                f"unknown SMOLA directive .smola.{head}",
-            )
+            self.output_lines.extend(normalized)
+        self.pending_comments = []
 
-    def _open_func(self, line: Line, is_method: bool) -> None:
+    # ----- label / GAS directive / raw RV instruction -----
+
+    def _handle_label(self, line: Line) -> None:
+        # If we're inside a function, register this label so branch
+        # operands can resolve it.
+        if self.current_func is not None:
+            self.current_func.declared_labels.add(line.head)
+        text = f"{line.head}:"
+        if line.trailing_comment:
+            text += f"    {line.trailing_comment}"
+        self._emit_to_current(text)
+
+    def _handle_gas_directive(self, line: Line) -> None:
+        # Pass-through with collision check. GAS directives rarely
+        # reference registers, but `.equ counter, 0x10` could.
+        if self.current_func is not None:
+            self._check_collisions(line)
+        body = f"    {line.head}"
+        if line.tail:
+            body += f" {line.tail}"
+        if line.trailing_comment:
+            body += f"    {line.trailing_comment}"
+        self._emit_to_current(body)
+
+    def _handle_rv_insn(self, line: Line) -> None:
+        # Special-case `call`: a tail with no commas is a raw call;
+        # a tail with commas is the SMOLA argument-shuffling form.
+        if line.head == "call" and ',' in line.tail:
+            self._handle_call_pseudo(line)
+            return
+
+        # Track calls for the frame planner.
+        if line.head in ("call", "jal", "tail"):
+            if self.current_func is not None:
+                self.current_func.calls_other = True
+
+        if self.current_func is not None:
+            # Substitute any SMOLA names in operands with their
+            # registers. We resolve every comma-separated operand;
+            # raw-register references trigger the collision check.
+            ops = _split_operands(line.tail)
+            new_ops = [self._resolve_operand(op, line) for op in ops]
+            text = f"    {line.head}"
+            if new_ops:
+                text += f" {', '.join(new_ops)}"
+            if line.trailing_comment:
+                # Trailing comment goes after the substituted operands.
+                text += f"    {line.trailing_comment}"
+            self._emit_to_current(text)
+        else:
+            # Outside any function — pass through unchanged. (This is
+            # rare; usually instructions live inside funcs. GAS will
+            # complain if they don't.)
+            text = f"    {line.head}"
+            if line.tail:
+                text += f" {line.tail}"
+            if line.trailing_comment:
+                text += f"    {line.trailing_comment}"
+            self._emit_to_current(text)
+
+    def _check_collisions(self, line: Line) -> None:
+        """Scan a passthrough line for register tokens that collide
+        with active bindings.
+
+        Conservative: we walk every word that could be a register name
+        and check it against the active binding table. False positives
+        are possible if a label happens to have the same name as a
+        register (rare). False negatives are not, which is the
+        important direction.
+        """
+        assert self.current_func is not None
+        alloc = self.current_func.alloc
+        full_text = (line.head + " " + line.tail) if line.tail else line.head
+        for match in _TOKEN_RE.finditer(full_text):
+            token = match.group(0)
+            canonical = normalize_reg(token)
+            if canonical is None:
+                continue
+            holder = alloc.reg_holder(canonical)
+            if holder is not None:
+                raise CollisionError(
+                    line.loc,
+                    f"register {canonical} is currently bound to "
+                    f"variable {holder.name!r}",
+                    hint=(
+                        f"use {holder.name!r} instead, or "
+                        f"`zap {holder.name}` before this line"
+                    ),
+                )
+
+    # ----- SMOLA keyword dispatch -----
+
+    def _handle_smola(self, line: Line) -> None:
+        head = line.head
+
+        # Block-shaping directives.
+        if head == "func":
+            self._open_func(line)
+            return
+        if head == "end":
+            self._close_func(line)
+            return
+        if head == "scope":
+            self._open_scope(line)
+            return
+        if head == "endscope":
+            self._close_scope(line)
+            return
+
+        # Declarations.
+        if head == "struct":
+            self._declare_struct(line)
+            return
+        if head == "stack":
+            self._set_user_spill(line)
+            return
+
+        # Variable declarations. Bare type keywords: int, ptr, flt,
+        # vec, f32, f64, and their .s/.a suffixed variants.
+        if head in ("int", "ptr", "flt", "vec",
+                    "int.s", "int.a", "ptr.s", "ptr.a",
+                    "flt.s", "flt.a", "vec.a",
+                    "f32", "f64", "f32.s", "f32.a", "f64.s", "f64.a"):
+            self._handle_var_decl(line)
+            return
+
+        if head == "zap":
+            self._handle_zap(line)
+            return
+
+        # Field access.
+        if head == "load_field":
+            self._handle_load_field(line)
+            return
+        if head == "store_field":
+            self._handle_store_field(line)
+            return
+        if head == "addr_field":
+            self._handle_addr_field(line)
+            return
+
+        # Raw escape hatch.
+        if head == "raw":
+            self._handle_raw(line)
+            return
+
+        raise ParseError(line.loc, f"unhandled SMOLA keyword {head!r}")
+
+    # ----- func / end -----
+
+    def _open_func(self, line: Line) -> None:
         if self.current_func is not None:
             raise FrameError(
                 line.loc,
                 f"nested function definitions are not allowed "
                 f"(currently inside {self.current_func.name!r})",
             )
-        # Parse "<name>" optionally followed by "static".
+
+        # Flush pending comments to top-level output BEFORE the
+        # function header.
+        self._flush_pending_comments(target="output")
+
         parts = line.tail.split()
         if not parts:
             raise ParseError(line.loc, "expected function name")
         name = parts[0]
         is_global = True
-        if len(parts) > 1:
-            if parts[1] == "static":
+        for extra in parts[1:]:
+            if extra == "static":
                 is_global = False
             else:
                 raise ParseError(
-                    line.loc,
-                    f"unknown modifier {parts[1]!r}",
+                    line.loc, f"unknown modifier {extra!r}",
                     hint="only 'static' is recognized",
                 )
-        # For methods, the name has a '.' which becomes '_' in the
-        # emitted symbol.
-        if is_method:
-            if '.' not in name:
-                raise ParseError(
-                    line.loc,
-                    "method name must be Struct.name",
-                )
-            struct_name, method_name = name.split('.', 1)
-            # Verify the struct exists. We don't *require* it -- a method
-            # could be declared on a struct that's defined later, but
-            # v1 enforces declare-before-use for clarity.
-            self.symbols.get_struct(struct_name, line.loc)
-            emit_name = f"{struct_name}_{method_name}"
+
+        # Detect Struct.method form. If the name has a dot AND a
+        # matching struct exists, treat as a method (implicit self
+        # binding). Otherwise emit the dot as an underscore in the
+        # symbol name without method semantics.
+        is_method = False
+        if '.' in name:
+            sname, mname = name.split('.', 1)
+            if self.symbols.has_struct(sname):
+                is_method = True
+            emit_name = f"{sname}_{mname}"
         else:
             emit_name = name
 
         ctx = FuncCtx(
-            name=emit_name,
-            is_global=is_global,
-            declared_at=line.loc,
+            name=emit_name, is_global=is_global, declared_at=line.loc,
         )
-        # Build the header lines.
-        header: List[str] = []
-        header.append("")
-        header.append(f"    .section .text.{emit_name}, \"ax\", @progbits")
+        # Build header lines.
+        header: List[str] = ["",
+            f"    .section .text.{emit_name}, \"ax\", @progbits"]
         if is_global:
             header.append(f"    .globl  {emit_name}")
         header.append(f"    .type   {emit_name}, @function")
@@ -229,76 +495,143 @@ class Translator:
         header.append(f"{emit_name}:")
         ctx.header_lines = header
 
-        # For methods, implicitly bind 'self' to a0.
+        # Implicit self binding for methods.
         if is_method:
-            ctx.alloc.alloc_A("self", explicit_reg="a0", loc=line.loc)
-            if self.emit_provenance:
-                ctx.body_lines.append(
-                    "    # smola: bind self -> a0  (argument, implicit)"
-                )
+            ctx.alloc.alloc("self", VarType.PTR, Storage.A,
+                            explicit_reg="a0", loc=line.loc)
 
         self.current_func = ctx
 
     def _close_func(self, line: Line) -> None:
         if self.current_func is None:
             raise FrameError(
-                line.loc,
-                ".smola.endfunc / .smola.endmethod without matching open",
+                line.loc, "end without matching func",
             )
         ctx = self.current_func
-        # Plan the frame.
+
+        # Capture the full binding history BEFORE auto-free clears it.
+        full_history = list(ctx.alloc.history)
+
+        # Auto-free everything still live. Errors on unclosed scopes.
+        freed = ctx.alloc.pop_all_remaining(line.loc)
+
+        # Frame plan.
         plan = plan_frame(
-            saved_s_regs=set(ctx.alloc.saved_S),
+            saved_int_s=set(ctx.alloc.saved_int_S),
+            saved_flt_s=set(ctx.alloc.saved_flt_S),
             calls_other=ctx.calls_other,
             user_spill_bytes=ctx.user_spill_bytes,
         )
-        # Stitch together.
+
+        # Stitch: header -> prologue -> bindings table -> body ->
+        # epilogue -> .size -> flt pool (if any).
         out = list(ctx.header_lines)
-        if plan.frame_size > 0 or plan.save_ra:
-            for pl in emit_prologue(plan):
-                out.append(pl)
+        out.extend(emit_prologue(plan))
+        if self.emit_provenance:
+            out.extend(self._format_bindings_table(full_history))
         out.extend(ctx.body_lines)
-        for el in emit_epilogue(plan):
-            out.append(el)
+        out.extend(emit_epilogue(plan))
         out.append(f"    .size {ctx.name}, .-{ctx.name}")
+        # Flt literal pool at the end of the function's section.
+        if ctx.flt_pool:
+            out.append(f"    .balign 8")
+            for label, bits in ctx.flt_pool:
+                out.append(f"{label}:")
+                # GAS .dword takes a value; we emit the 64-bit pattern
+                # in hex with proper width.
+                out.append(f"    .dword 0x{bits:016x}")
         out.append("")
         self.output_lines.extend(out)
         self.current_func = None
 
+    def _format_bindings_table(self, history: List[Binding]) -> List[str]:
+        """Build the auto-generated bindings table comment block.
+
+        Lists every named variable that lived in the function, in
+        declaration order, with its physical register and type.
+        Bindings inside nested scopes get a (scope N) annotation.
+
+        Internal SMOLA-generated transient bindings (names starting
+        with `.smola_`) are filtered out — they exist for one or two
+        instructions during float initialization and would just be
+        noise in the user-facing table.
+        """
+        # Filter user bindings only.
+        user_bindings = [b for b in history
+                         if not b.name.startswith('.smola_')]
+        if not user_bindings:
+            return ["    # smola: bindings — (none)"]
+        lines = ["    # smola: bindings —"]
+        for b in user_bindings:
+            scope_suffix = ""
+            if b.scope_depth > 1:
+                scope_suffix = f", scope {b.scope_depth}"
+            lines.append(
+                f"    #   {b.name}: {b.reg} "
+                f"({b.var_type.value}, {b.storage.value}{scope_suffix})"
+            )
+        return lines
+
+    # ----- scope / endscope -----
+
+    def _open_scope(self, line: Line) -> None:
+        ctx = self._ensure_func(line)
+        ctx.alloc.push_scope()
+        if self.emit_provenance:
+            ctx.body_lines.append(
+                f"    # smola: scope begin (depth {ctx.alloc.current_depth})"
+            )
+
+    def _close_scope(self, line: Line) -> None:
+        ctx = self._ensure_func(line)
+        depth_before = ctx.alloc.current_depth
+        freed = ctx.alloc.pop_scope(line.loc)
+        if self.emit_provenance:
+            if freed:
+                ctx.body_lines.append(
+                    f"    # smola: scope end (depth {depth_before}) "
+                    f"— freed: {', '.join(freed)}"
+                )
+            else:
+                ctx.body_lines.append(
+                    f"    # smola: scope end (depth {depth_before})"
+                )
+
+    # ----- struct / stack -----
+
     def _declare_struct(self, line: Line) -> None:
-        # Parse: <Name> { <field>: <type>, <field>: <type>, ... }
         text = line.tail.strip()
-        # Find '{' and '}'.
         if '{' not in text or '}' not in text:
             raise StructError(
                 line.loc,
-                "struct declaration must be: Name { field: type, ... }",
+                "struct declaration must be: struct Name { field: type, ... }",
             )
         name_part, _, rest = text.partition('{')
         body, _, _ = rest.partition('}')
         name = name_part.strip()
         if not name:
             raise StructError(line.loc, "struct must have a name")
-        fields_raw: List[Tuple[str, str]] = []
-        for field_text in body.split(','):
-            ft = field_text.strip()
+        raw_fields: List[Tuple[str, str]] = []
+        for ft in body.split(','):
+            ft = ft.strip()
             if not ft:
                 continue
             if ':' not in ft:
-                raise StructError(
-                    line.loc,
-                    f"field {ft!r} must be name: type",
-                )
+                raise StructError(line.loc, f"field {ft!r} must be name: type")
             fname, _, tname = ft.partition(':')
-            fields_raw.append((fname.strip(), tname.strip()))
-        if not fields_raw:
+            raw_fields.append((fname.strip(), tname.strip()))
+        if not raw_fields:
             raise StructError(line.loc, f"struct {name!r} has no fields")
-        sdef = define_struct(name, fields_raw, loc=line.loc)
+        sdef = define_struct(name, raw_fields, loc=line.loc)
         self.symbols.add_struct(sdef)
-        # Emit GAS .set lines for the offsets so user pass-through code
-        # can reference them.
+
+        # Emit the GAS .set lines so raw-assembly code can reference
+        # offsets symbolically.
         if self.emit_provenance:
-            self.output_lines.append(f"    # smola: struct {name} ({sdef.size} bytes, align {sdef.align})")
+            self.output_lines.append(
+                f"    # smola: struct {name} "
+                f"({sdef.size} bytes, align {sdef.align})"
+            )
         for f in sdef.fields:
             self.output_lines.append(
                 f"    .set {name}_{f.name}_offset, {f.offset}"
@@ -308,11 +641,7 @@ class Translator:
         self.output_lines.append("")
 
     def _set_user_spill(self, line: Line) -> None:
-        if self.current_func is None:
-            raise FrameError(
-                line.loc,
-                ".smola.stack must appear inside a function",
-            )
+        ctx = self._ensure_func(line)
         try:
             n = int(line.tail.strip(), 0)
         except ValueError:
@@ -322,218 +651,378 @@ class Translator:
             )
         if n < 0:
             raise ParseError(line.loc, "stack size must be non-negative")
-        self.current_func.user_spill_bytes = n
+        ctx.user_spill_bytes = n
 
-    # ----- SMOLA pseudo-instruction handling -----
+    # ----- variable declarations -----
 
-    def _handle_smola_insn(self, line: Line) -> None:
-        head = line.head
-        operands = _split_operands(line.tail)
+    def _handle_var_decl(self, line: Line) -> None:
+        """Parse and handle `int name`, `int name init`, `int.s name`,
+        `int.a name = a3`, etc."""
+        ctx = self._ensure_func(line)
+        keyword = line.head
+        # Determine (var_type, storage) from the keyword.
+        try:
+            var_type, storage = _parse_var_keyword(keyword)
+        except ParseError as e:
+            # Re-raise with proper source location.
+            raise ParseError(line.loc, e.message, hint=e.hint)
 
-        if head in ("VAR.T", "VAR.S", "VAR.A", "VAR.RET", "VAR.ALIAS"):
-            self._handle_var_directive(head, operands, line)
-            return
-        if head == "FREE":
-            self._handle_free(operands, line)
-            return
-        if head == "LOAD_FIELD":
-            self._handle_load_field(operands, line)
-            return
-        if head == "STORE_FIELD":
-            self._handle_store_field(operands, line)
-            return
-        if head == "LA_FIELD":
-            self._handle_la_field(operands, line)
-            return
-        if head == "CALL":
-            self._handle_call(operands, line)
-            return
+        # Distinguish base from precision modifier (f32, f64 default
+        # the flt precision; we remember it for init emission).
+        base, _, _ = keyword.partition('.')
+        precision = base if base in ("f32", "f64") else None
+        # `flt` without precision defaults to f32 for initialization.
+        if base == "flt":
+            precision = "f32"
 
-        # Generic pseudo-instruction: substitute names with registers.
-        self._handle_generic_insn(line, operands)
-
-    def _ensure_func(self, line: Line) -> FuncCtx:
-        if self.current_func is None:
-            raise FrameError(
-                line.loc,
-                f"{line.head} must appear inside a function",
-                hint="open a function with .smola.func or .smola.method",
+        # Parse the tail. Allowed shapes:
+        #   <name>
+        #   <name> <initializer>
+        #   <name> = <reg>        (only for .a storage)
+        #   <initializer>          (anonymous — reserved for v0.4)
+        tail = line.tail.strip()
+        if tail == "":
+            raise ParseError(
+                line.loc, f"`{keyword}` requires a variable name",
             )
-        return self.current_func
 
-    def _handle_var_directive(self, head: str, operands: List[str], line: Line) -> None:
-        ctx = self._ensure_func(line)
-        if head == "VAR.T":
-            if len(operands) != 1:
-                raise ParseError(line.loc, "VAR.T takes exactly one name")
-            name = operands[0]
-            reg = ctx.alloc.alloc_T(name, loc=line.loc)
-            if self.emit_provenance:
-                ctx.body_lines.append(
-                    f"    # smola: bind {name} -> {reg}  (caller-saved)"
-                )
-        elif head == "VAR.S":
-            if len(operands) != 1:
-                raise ParseError(line.loc, "VAR.S takes exactly one name")
-            name = operands[0]
-            reg = ctx.alloc.alloc_S(name, loc=line.loc)
-            if self.emit_provenance:
-                ctx.body_lines.append(
-                    f"    # smola: bind {name} -> {reg}  (callee-saved, frame slot reserved)"
-                )
-        elif head == "VAR.A":
-            if len(operands) == 1:
-                name = operands[0]
-                reg = ctx.alloc.alloc_A(name, loc=line.loc)
-            elif len(operands) == 2:
-                name, explicit = operands
-                reg = ctx.alloc.alloc_A(name, explicit_reg=explicit, loc=line.loc)
-            else:
-                raise ParseError(line.loc, "VAR.A takes name [, register]")
-            if self.emit_provenance:
-                ctx.body_lines.append(
-                    f"    # smola: bind {name} -> {reg}  (argument)"
-                )
-        elif head == "VAR.RET":
-            if len(operands) != 1:
-                raise ParseError(line.loc, "VAR.RET takes exactly one name")
-            name = operands[0]
-            reg = ctx.alloc.alloc_A(name, explicit_reg="a0", loc=line.loc)
-            if self.emit_provenance:
-                ctx.body_lines.append(
-                    f"    # smola: bind {name} -> {reg}  (return value)"
-                )
-        elif head == "VAR.ALIAS":
-            # Syntax: VAR.ALIAS new = old
-            joined = ", ".join(operands)
-            if '=' not in joined:
-                raise ParseError(line.loc, "VAR.ALIAS syntax: VAR.ALIAS new = old")
-            new_name, _, old_name = joined.partition('=')
-            new_name = new_name.strip()
-            old_name = old_name.strip()
-            reg = ctx.alloc.alias(new_name, old_name, loc=line.loc)
-            if self.emit_provenance:
-                ctx.body_lines.append(
-                    f"    # smola: alias {new_name} -> {reg}  (same as {old_name})"
-                )
-
-    def _handle_free(self, operands: List[str], line: Line) -> None:
-        ctx = self._ensure_func(line)
-        for name in operands:
-            ctx.alloc.free(name, loc=line.loc)
-            if self.emit_provenance:
-                ctx.body_lines.append(f"    # smola: free {name}")
-
-    def _handle_load_field(self, operands: List[str], line: Line) -> None:
-        # LOAD_FIELD dst, base, Struct.field
-        ctx = self._ensure_func(line)
-        if len(operands) != 3:
+        # Check for the reserved anonymous form: a tail that looks like
+        # an immediate with no preceding identifier.
+        first_token = tail.split()[0] if tail.split() else ""
+        if _looks_like_immediate(first_token) and not _is_ident(first_token):
             raise ParseError(
                 line.loc,
-                "LOAD_FIELD takes dst, base, Struct.field",
+                "anonymous temporaries reserved for v0.4",
+                hint=f"name the binding explicitly: '{keyword} tmp {first_token}'",
             )
-        dst_name, base_name, field_path = operands
-        dst = ctx.alloc.resolve(dst_name, line.loc)
-        base = ctx.alloc.resolve(base_name, line.loc)
+
+        # Check for explicit pinning syntax (only .a storage).
+        explicit_reg: Optional[str] = None
+        if '=' in tail:
+            decl_part, _, reg_part = tail.partition('=')
+            decl_part = decl_part.strip()
+            explicit_reg = reg_part.strip()
+            if storage != Storage.A:
+                raise ParseError(
+                    line.loc,
+                    "explicit register pinning is only valid for .a storage",
+                    hint="use .a suffix or remove the '= <reg>'",
+                )
+            tokens = decl_part.split()
+            if len(tokens) != 1:
+                raise ParseError(
+                    line.loc,
+                    "expected: <type>.a <name> = <reg>",
+                )
+            name = tokens[0]
+            initializer = None
+        else:
+            tokens = tail.split(maxsplit=1)
+            name = tokens[0]
+            initializer = tokens[1].strip() if len(tokens) > 1 else None
+
+        # Allocate the register.
+        reg = ctx.alloc.alloc(name, var_type, storage,
+                              loc=line.loc, explicit_reg=explicit_reg)
+
+        # Emit a brief inline provenance comment. The full bindings
+        # table is emitted at end-of-function; this inline comment
+        # documents the binding at its declaration site for readers
+        # who scroll through the .s linearly.
+        if self.emit_provenance:
+            storage_label = {
+                Storage.T: "temp",
+                Storage.S: "saved",
+                Storage.A: "arg",
+            }[storage]
+            type_label = precision if precision else var_type.value
+            ctx.body_lines.append(
+                f"    # smola: {name} -> {reg} ({type_label}, {storage_label})"
+            )
+
+        # Handle initialization if present.
+        if initializer is not None:
+            self._emit_var_init(ctx, line, name, reg, var_type, precision,
+                                 initializer)
+
+    def _emit_var_init(self, ctx: FuncCtx, line: Line,
+                        name: str, reg: str, var_type: VarType,
+                        precision: Optional[str],
+                        initializer: str) -> None:
+        """Emit the instruction(s) needed to initialize a variable to
+        the given immediate.
+
+        Integer / pointer: emit `li reg, value`.
+        f32: emit `li tN, bits; fmv.w.x reg, tN` using a transient
+              temporary.
+        f64: emit a literal-pool entry and `la tN, label; fld reg, 0(tN)`.
+        vec: not supported for initialization (no obvious idiom).
+        """
+        if var_type in (VarType.INT, VarType.PTR):
+            # Integer immediate. GAS's `li` pseudo-instruction handles
+            # arbitrary-width constants via lui+addi or other sequences.
+            ctx.body_lines.append(
+                f"    li   {reg}, {initializer}    "
+                f"# smola: init {name}"
+            )
+            return
+
+        if var_type == VarType.FLT:
+            # Parse the float literal.
+            try:
+                fval = float(initializer)
+            except ValueError:
+                raise ParseError(
+                    line.loc,
+                    f"expected float literal, got {initializer!r}",
+                )
+            if precision == "f32":
+                self._emit_f32_init(ctx, name, reg, fval, line)
+            else:
+                self._emit_f64_init(ctx, name, reg, fval, line)
+            return
+
+        if var_type == VarType.VEC:
+            raise ParseError(
+                line.loc,
+                "vec variables cannot be initialized at declaration",
+                hint="use a vector load or vfmv after declaration",
+            )
+
+    def _emit_f32_init(self, ctx: FuncCtx, name: str, reg: str,
+                        fval: float, line: Line) -> None:
+        """Emit `li tN, <bits>; fmv.w.x reg, tN` for an f32 immediate.
+
+        We need a transient integer temporary. We claim one from the
+        T pool, use it, then return it. If the pool is exhausted, error
+        — the user is in a corner case where they'd need to zap
+        something first.
+        """
+        # Get the IEEE 754 single-precision bit pattern.
+        bits = _struct.unpack('<I', _struct.pack('<f', fval))[0]
+        # Allocate a transient temp.
+        try:
+            tmp_name = f".smola_init_tmp_{ctx.label_counter}"
+            ctx.label_counter += 1
+            tmp_reg = ctx.alloc.alloc(tmp_name, VarType.INT, Storage.T,
+                                       loc=line.loc)
+        except RegAllocError:
+            raise ParseError(
+                line.loc,
+                "no integer temporary available for f32 initialization",
+                hint=("zap an unused int variable before this declaration"),
+            )
+        ctx.body_lines.append(
+            f"    li   {tmp_reg}, 0x{bits:08x}    "
+            f"# smola: init {name} (f32 bit pattern)"
+        )
+        ctx.body_lines.append(
+            f"    fmv.w.x {reg}, {tmp_reg}    "
+            f"# smola: init {name}"
+        )
+        # Release the transient.
+        ctx.alloc.zap(tmp_name, loc=line.loc)
+
+    def _emit_f64_init(self, ctx: FuncCtx, name: str, reg: str,
+                        fval: float, line: Line) -> None:
+        """Emit a literal-pool entry plus `la tN, label; fld reg, 0(tN)`."""
+        bits = _struct.unpack('<Q', _struct.pack('<d', fval))[0]
+        label = f".Lflt_{ctx.name}_{ctx.label_counter}"
+        ctx.label_counter += 1
+        ctx.flt_pool.append((label, bits))
+        # Need a transient int temp for the address.
+        try:
+            tmp_name = f".smola_init_tmp_{ctx.label_counter}"
+            ctx.label_counter += 1
+            tmp_reg = ctx.alloc.alloc(tmp_name, VarType.INT, Storage.T,
+                                       loc=line.loc)
+        except RegAllocError:
+            raise ParseError(
+                line.loc,
+                "no integer temporary available for f64 initialization",
+                hint="zap an unused int variable before this declaration",
+            )
+        ctx.body_lines.append(
+            f"    la   {tmp_reg}, {label}    "
+            f"# smola: init {name} (f64 literal pool)"
+        )
+        ctx.body_lines.append(
+            f"    fld  {reg}, 0({tmp_reg})    "
+            f"# smola: init {name}"
+        )
+        ctx.alloc.zap(tmp_name, loc=line.loc)
+
+    # ----- zap -----
+
+    def _handle_zap(self, line: Line) -> None:
+        ctx = self._ensure_func(line)
+        names = _split_operands(line.tail)
+        if not names:
+            raise ParseError(line.loc, "zap requires at least one name")
+        for name in names:
+            ctx.alloc.zap(name, loc=line.loc)
+            if self.emit_provenance:
+                ctx.body_lines.append(f"    # smola: zap {name}")
+
+    # ----- field access -----
+
+    def _handle_load_field(self, line: Line) -> None:
+        ctx = self._ensure_func(line)
+        ops = _split_operands(line.tail)
+        if len(ops) != 3:
+            raise ParseError(
+                line.loc,
+                "load_field takes dst, base, Struct.field",
+            )
+        dst_name, base_name, field_path = ops
+        dst = self._resolve_operand(dst_name, line)
+        base = self._resolve_operand(base_name, line)
         sdef, f = self.symbols.resolve_field(field_path, line.loc)
-        provenance = (f"# LOAD_FIELD {dst_name}, {base_name}, {field_path}"
-                      if self.emit_provenance else "")
+        provenance = (
+            f"# load_field {dst_name}, {base_name}, {field_path}"
+            if self.emit_provenance else ""
+        )
         ctx.body_lines.append(
             f"    {f.load_mnemonic:<4} {dst}, {f.offset}({base})    {provenance}"
         )
 
-    def _handle_store_field(self, operands: List[str], line: Line) -> None:
+    def _handle_store_field(self, line: Line) -> None:
         ctx = self._ensure_func(line)
-        if len(operands) != 3:
+        ops = _split_operands(line.tail)
+        if len(ops) != 3:
             raise ParseError(
                 line.loc,
-                "STORE_FIELD takes src, base, Struct.field",
+                "store_field takes src, base, Struct.field",
             )
-        src_name, base_name, field_path = operands
-        src = ctx.alloc.resolve(src_name, line.loc)
-        base = ctx.alloc.resolve(base_name, line.loc)
+        src_name, base_name, field_path = ops
+        src = self._resolve_operand(src_name, line)
+        base = self._resolve_operand(base_name, line)
         sdef, f = self.symbols.resolve_field(field_path, line.loc)
-        provenance = (f"# STORE_FIELD {src_name}, {base_name}, {field_path}"
-                      if self.emit_provenance else "")
+        provenance = (
+            f"# store_field {src_name}, {base_name}, {field_path}"
+            if self.emit_provenance else ""
+        )
         ctx.body_lines.append(
             f"    {f.store_mnemonic:<4} {src}, {f.offset}({base})    {provenance}"
         )
 
-    def _handle_la_field(self, operands: List[str], line: Line) -> None:
+    def _handle_addr_field(self, line: Line) -> None:
         ctx = self._ensure_func(line)
-        if len(operands) != 3:
+        ops = _split_operands(line.tail)
+        if len(ops) != 3:
             raise ParseError(
                 line.loc,
-                "LA_FIELD takes dst, base, Struct.field",
+                "addr_field takes dst, base, Struct.field",
             )
-        dst_name, base_name, field_path = operands
-        dst = ctx.alloc.resolve(dst_name, line.loc)
-        base = ctx.alloc.resolve(base_name, line.loc)
+        dst_name, base_name, field_path = ops
+        dst = self._resolve_operand(dst_name, line)
+        base = self._resolve_operand(base_name, line)
         sdef, f = self.symbols.resolve_field(field_path, line.loc)
-        provenance = (f"# LA_FIELD {dst_name}, {base_name}, {field_path}"
-                      if self.emit_provenance else "")
+        provenance = (
+            f"# addr_field {dst_name}, {base_name}, {field_path}"
+            if self.emit_provenance else ""
+        )
         if -2048 <= f.offset <= 2047:
             ctx.body_lines.append(
                 f"    addi {dst}, {base}, {f.offset}    {provenance}"
             )
         else:
-            # Multi-instruction sequence. For v1, we delegate to the
-            # assembler's pseudo-op behavior: use 'li' + 'add'.
             ctx.body_lines.append(
-                f"    li   {dst}, {f.offset}    {provenance} (high offset)"
+                f"    li   {dst}, {f.offset}    "
+                f"{provenance} (offset > 12 bits)"
             )
-            ctx.body_lines.append(
-                f"    add  {dst}, {dst}, {base}"
-            )
+            ctx.body_lines.append(f"    add  {dst}, {dst}, {base}")
 
-    def _handle_call(self, operands: List[str], line: Line) -> None:
-        # CALL <target>, arg1, arg2, ...
+    # ----- SMOLA call (argument-shuffling pseudo) -----
+
+    def _handle_call_pseudo(self, line: Line) -> None:
         ctx = self._ensure_func(line)
-        if len(operands) < 1:
-            raise ParseError(line.loc, "CALL takes a target and zero or more arguments")
-        target = operands[0]
-        args = operands[1:]
-        # If target contains a '.', treat as Struct.method.
+        ops = _split_operands(line.tail)
+        target = ops[0]
+        args = ops[1:]
+
+        # Detect Struct.method form. If the dot-prefixed part is a
+        # known struct, emit the mangled symbol.
         if '.' in target:
-            struct_name, method_name = target.split('.', 1)
-            # Verify the struct exists.
-            self.symbols.get_struct(struct_name, line.loc)
-            emit_target = f"{struct_name}_{method_name}"
+            sname, mname = target.split('.', 1)
+            if self.symbols.has_struct(sname):
+                emit_target = f"{sname}_{mname}"
+            else:
+                emit_target = target  # passthrough; GAS will resolve
         else:
             emit_target = target
 
-        # Plan argument moves. For each arg i, we want it in a<i>.
-        # First, resolve each arg name to its current register (or
-        # accept that it's an immediate or label).
-        target_regs = [f"a{i}" for i in range(len(args))]
-        if len(args) > 8:
-            raise ParseError(
-                line.loc,
-                f"CALL with {len(args)} args; v1 supports at most 8 in a0..a7",
-            )
+        # Classify args by VarType, shuffle to a/fa/v registers.
+        int_arg_targets = ["a0", "a1", "a2", "a3",
+                           "a4", "a5", "a6", "a7"]
+        flt_arg_targets = ["fa0", "fa1", "fa2", "fa3",
+                           "fa4", "fa5", "fa6", "fa7"]
+        vec_arg_targets = [f"v{i}" for i in range(8, 24)]
 
-        # Resolve sources. A source can be a bound name, a raw register,
-        # or an integer literal. Strings starting with a digit or '-' are
-        # treated as immediates; we emit 'li' for those.
-        moves: List[Tuple[str, str, bool]] = []  # (dst, src_or_imm, is_imm)
-        for arg, dst in zip(args, target_regs):
+        int_idx = 0
+        flt_idx = 0
+        vec_idx = 0
+        # moves: (dst_reg, src_or_imm, kind)
+        moves: List[Tuple[str, str, str]] = []
+
+        for arg in args:
             if _looks_like_immediate(arg):
-                moves.append((dst, arg, True))
+                if int_idx >= len(int_arg_targets):
+                    raise ParseError(line.loc,
+                                     "too many integer arguments (max 8)")
+                moves.append((int_arg_targets[int_idx], arg, "imm"))
+                int_idx += 1
+                continue
+            if ctx.alloc.is_bound(arg):
+                b = ctx.alloc.bindings[arg]
+                src_reg = b.reg
+                if b.var_type in (VarType.INT, VarType.PTR):
+                    if int_idx >= len(int_arg_targets):
+                        raise ParseError(line.loc, "too many int args")
+                    moves.append((int_arg_targets[int_idx], src_reg, "int_mv"))
+                    int_idx += 1
+                elif b.var_type == VarType.FLT:
+                    if flt_idx >= len(flt_arg_targets):
+                        raise ParseError(line.loc, "too many flt args")
+                    moves.append((flt_arg_targets[flt_idx], src_reg, "flt_mv"))
+                    flt_idx += 1
+                elif b.var_type == VarType.VEC:
+                    if vec_idx >= len(vec_arg_targets):
+                        raise ParseError(line.loc, "too many vec args")
+                    moves.append((vec_arg_targets[vec_idx], src_reg, "vec_mv"))
+                    vec_idx += 1
             else:
-                src = ctx.alloc.resolve(arg, line.loc)
-                moves.append((dst, src, False))
+                canonical = normalize_reg(arg)
+                if canonical is None:
+                    raise RegAllocError(
+                        line.loc, f"unknown name {arg!r}",
+                        hint=("declare it with int/ptr/flt/vec, or "
+                              "pass an immediate"),
+                    )
+                if canonical[0] == 'f':
+                    if flt_idx >= len(flt_arg_targets):
+                        raise ParseError(line.loc, "too many flt args")
+                    moves.append((flt_arg_targets[flt_idx], canonical, "flt_mv"))
+                    flt_idx += 1
+                elif canonical[0] == 'v':
+                    if vec_idx >= len(vec_arg_targets):
+                        raise ParseError(line.loc, "too many vec args")
+                    moves.append((vec_arg_targets[vec_idx], canonical, "vec_mv"))
+                    vec_idx += 1
+                else:
+                    if int_idx >= len(int_arg_targets):
+                        raise ParseError(line.loc, "too many int args")
+                    moves.append((int_arg_targets[int_idx], canonical, "int_mv"))
+                    int_idx += 1
 
-        # Cycle detection: build a graph dst<-src and look for cycles.
-        # For v1 we only need to detect; we don't resolve.
-        # Build map of register sources to register dests.
-        graph = {}  # src_reg -> dst_reg
-        for dst, src, is_imm in moves:
-            if is_imm:
+        # Cycle detection per kind.
+        graph = {}
+        for dst, src, kind in moves:
+            if kind == "imm":
                 continue
             if src == dst:
                 continue
             graph[src] = dst
-        # Detect cycles by walking from each src.
         for src in list(graph.keys()):
             seen = set()
             cur = src
@@ -541,158 +1030,177 @@ class Translator:
                 if cur in seen:
                     raise ParseError(
                         line.loc,
-                        "argument shuffle has a cycle; v1 cannot resolve "
-                        "this. Move one operand to a temporary first.",
+                        "argument shuffle has a cycle; "
+                        "move one operand to a temporary first",
                     )
                 seen.add(cur)
                 cur = graph[cur]
 
-        # Emit moves. Naive: for now, emit in order. This is safe only
-        # when no later move clobbers an earlier source. To be safe,
-        # we use the standard topological emit: repeatedly emit moves
-        # whose dst is not currently a source, then break ties.
+        # Topological emit.
         pending = list(moves)
         emitted: List[str] = []
-        # Determine all current sources.
         while pending:
             progressed = False
-            for i, (dst, src, is_imm) in enumerate(pending):
-                if is_imm:
+            for i, (dst, src, kind) in enumerate(pending):
+                if kind == "imm":
                     emitted.append(f"li   {dst}, {src}")
                     pending.pop(i)
                     progressed = True
                     break
-                # Check if dst is the source of any remaining move.
                 others = [m for j, m in enumerate(pending) if j != i]
-                conflict = any((not o_imm) and o_src == dst
-                               for (_, o_src, o_imm) in others)
-                if not conflict:
-                    if dst != src:
+                conflict = any(
+                    o_kind != "imm" and o_src == dst
+                    for (_, o_src, o_kind) in others
+                )
+                if conflict:
+                    continue
+                if dst != src:
+                    if kind == "flt_mv":
+                        emitted.append(f"fmv.d {dst}, {src}")
+                    elif kind == "vec_mv":
+                        emitted.append(f"vmv.v.v {dst}, {src}")
+                    else:
                         emitted.append(f"mv   {dst}, {src}")
-                    pending.pop(i)
-                    progressed = True
-                    break
+                pending.pop(i)
+                progressed = True
+                break
             if not progressed:
-                # Should have been caught by cycle detection.
                 raise ParseError(
-                    line.loc,
-                    "argument shuffle blocked; this is a SMOLA bug if "
-                    "cycle detection above missed it.",
+                    line.loc, "argument shuffle blocked (smola bug)",
                 )
 
-        provenance = f"# CALL {target}, {', '.join(args)}" if self.emit_provenance else ""
+        provenance = (
+            f"# call {target}" + (f", {', '.join(args)}" if args else "")
+            if self.emit_provenance else ""
+        )
         for em in emitted:
             ctx.body_lines.append(f"    {em}")
         ctx.body_lines.append(f"    call {emit_target}    {provenance}")
         ctx.calls_other = True
 
-    def _handle_generic_insn(self, line: Line, operands: List[str]) -> None:
-        ctx = self._ensure_func(line)
-        # Substitute each operand. Operands may be:
-        #   - a bare name -> resolve to register
-        #   - a memory operand 'imm(name)' -> resolve the name
-        #   - a label, immediate, or raw register -> pass through
-        new_operands: List[str] = []
-        for op in operands:
-            new_operands.append(self._substitute_operand(op, line))
-        mnemonic = line.head.lower()
-        provenance = ""
-        if self.emit_provenance:
-            provenance = f"# {line.head} {line.tail}"
-        joined = ", ".join(new_operands)
-        ctx.body_lines.append(f"    {mnemonic:<4} {joined}    {provenance}")
+    # ----- raw escape hatch -----
 
-    def _substitute_operand(self, op: str, line: Line) -> str:
+    def _handle_raw(self, line: Line) -> None:
+        """Emit the line's tail verbatim with leading indentation.
+        Provenance comment notes the rawness."""
+        text = f"    {line.tail}"
+        if line.trailing_comment:
+            text += f"    {line.trailing_comment}"
+        if self.emit_provenance:
+            text += "    # raw"
+        self._emit_to_current(text)
+
+    # ----- operand resolution with collision detection -----
+
+    def _resolve_operand(self, op: str, line: Line) -> str:
+        """Resolve an operand for a SMOLA pseudo-instruction.
+
+        Handles three shapes:
+          - `imm(name)` memory operand
+          - immediate or local label
+          - bare name (resolved) or raw register (collision check)
+        """
         ctx = self.current_func
         assert ctx is not None
-        # Memory operand?
+        # Memory operand.
         m = _MEM_OPERAND_RE.match(op)
         if m:
-            imm = m.group(1)
+            imm = m.group(1) or "0"
             base_name = m.group(2)
-            # If the inner name is a known binding or raw register,
-            # resolve it. If it's a label-like immediate, pass through.
-            # If it's an unknown name, error.
             if _looks_like_immediate(base_name):
                 base = base_name
             else:
-                base = ctx.alloc.resolve(base_name, line.loc)
+                base = self._resolve_bare(base_name, line)
             return f"{imm}({base})"
-        # Numeric immediate or local label (starts with '.')?
+        # Immediate or label.
         if _looks_like_immediate(op):
             return op
-        # Raw register name?
-        if normalize_reg(op) is not None:
-            return ctx.alloc.resolve(op, line.loc)
-        # Otherwise: must be a bound name, or error.
-        if ctx.alloc.is_bound(op):
-            return ctx.alloc.resolve(op, line.loc)
-        # Final fallback: unresolved. Report a clean error rather than
-        # silently passing the name through as a label.
-        raise RegAllocError(
-            line.loc,
-            f"unknown name {op!r}",
-            hint=(
-                "declare it with VAR.T/VAR.S/VAR.A first, "
-                "or use the '!' escape hatch for raw assembly with global labels"
-            ),
-        )
+        return self._resolve_bare(op, line)
+
+    def _resolve_bare(self, name: str, line: Line) -> str:
+        """Resolve a bare-name operand with collision check.
+
+        If `name` is a raw register currently bound to a variable,
+        error. If `name` is a declared label in this function, pass
+        it through. Otherwise return the canonical ABI form (for raw
+        regs) or the bound register (for SMOLA names).
+        """
+        ctx = self.current_func
+        assert ctx is not None
+        canonical = normalize_reg(name)
+        if canonical is not None:
+            holder = ctx.alloc.reg_holder(canonical)
+            if holder is not None:
+                raise CollisionError(
+                    line.loc,
+                    f"register {canonical} is currently bound to "
+                    f"variable {holder.name!r}",
+                    hint=(
+                        f"use {holder.name!r} instead, or "
+                        f"`zap {holder.name}` first"
+                    ),
+                )
+            return canonical
+        if ctx.alloc.is_bound(name):
+            return ctx.alloc.bindings[name].reg
+        # Recognized label declared earlier in this function? Pass
+        # through. This handles bare `loop` in `bnez counter, loop`.
+        if name in ctx.declared_labels:
+            return name
+        # Forward labels — labels declared *later* in the function —
+        # are accepted too if they look like identifiers. This is a
+        # small concession: the alternative would require a two-pass
+        # walk to collect labels first. We accept any identifier-
+        # shaped name in branch-operand position as a probable label
+        # rather than a typo. GAS will catch genuinely-undefined
+        # references at link time with a much better diagnostic than
+        # SMOLA could give.
+        if _is_ident(name):
+            return name
+        return ctx.alloc.resolve(name, line.loc)
 
     # ----- output helpers -----
 
     def _emit_to_current(self, text: str) -> None:
+        """Emit text into the current function's body buffer, or to
+        the top-level output if no function is active."""
         if self.current_func is not None:
             self.current_func.body_lines.append(text)
         else:
             self.output_lines.append(text)
 
-    def _format_passthrough(self, line: Line) -> str:
-        # Indent instructions, but leave directives/labels at column 0.
-        if line.kind in (LineKind.INSN_RAW,):
-            body = f"    {line.head}"
-            if line.tail:
-                body += f" {line.tail}"
-        elif line.kind == LineKind.GAS_DIRECTIVE:
-            body = f"    {line.head}"
-            if line.tail:
-                body += f" {line.tail}"
-        else:
-            body = line.head + (f" {line.tail}" if line.tail else "")
-        if line.trailing_comment:
-            body += f"    {line.trailing_comment}"
-        return body
-
-    def _fmt_trail(self, line: Line) -> str:
-        return f"    {line.trailing_comment}" if line.trailing_comment else ""
+    def _ensure_func(self, line: Line) -> FuncCtx:
+        if self.current_func is None:
+            raise FrameError(
+                line.loc,
+                f"`{line.head}` must appear inside a function",
+                hint="open a function with `func`",
+            )
+        return self.current_func
 
     def _emit_file_header(self) -> None:
-        self.output_lines.append(f"# Generated by SMOLA v{__version__} from {self.filename}")
-        self.output_lines.append("# Do not edit -- regenerate from the .smola source.")
+        self.output_lines.append(
+            f"# Generated by SMOLA v{__version__} from {self.filename}"
+        )
+        self.output_lines.append(
+            "# Do not edit -- regenerate from the .smola source."
+        )
         self.output_lines.append("")
 
 
 def _fold_multiline_structs(source: str) -> str:
-    """Join multi-line .smola.struct declarations onto a single line.
-
-    The lexer cannot handle field lines like '    x: i64,' because they
-    look like labels. We fold them before lexing.
-
-    Brace-depth tracking is line-based and shallow: we only need to
-    handle one '{' ... '}' per struct, no nesting.
-    """
-    out_lines = []
+    """Join multi-line `struct` declarations onto a single line before
+    lexing. Field lines like `    x: i64,` would otherwise lex as
+    labels and confuse the parser. Blank placeholder lines preserve
+    line numbering for downstream errors."""
+    out = []
     src_lines = source.splitlines(keepends=False)
     i = 0
     while i < len(src_lines):
         line = src_lines[i]
         stripped = line.strip()
-        if (stripped.startswith('.smola.struct')
+        if (stripped.startswith('struct')
                 and '{' in stripped and '}' not in stripped):
-            # Accumulate until '}' is seen on some line. Each
-            # accumulated line is appended after a space, preserving
-            # field separation. We also emit blank placeholder lines
-            # for skipped originals so source line numbers stay aligned
-            # for any errors emitted AFTER the struct.
             buf = stripped
             consumed = 1
             j = i + 1
@@ -705,37 +1213,23 @@ def _fold_multiline_structs(source: str) -> str:
                     break
                 j += 1
             if not found:
-                # Let the lexer/parser report this as an unclosed
-                # struct on the original line; we leave the source
-                # unchanged.
-                out_lines.append(line)
+                out.append(line)
                 i += 1
                 continue
-            out_lines.append(buf)
+            out.append(buf)
             for _ in range(consumed - 1):
-                out_lines.append("")
+                out.append("")
             i += consumed
             continue
-        out_lines.append(line)
+        out.append(line)
         i += 1
-    return "\n".join(out_lines)
+    return "\n".join(out)
 
 
-def _looks_like_immediate(s: str) -> bool:
-    """Heuristic: does this operand look like a numeric immediate or label?"""
-    s = s.strip()
+def _is_ident(s: str) -> bool:
+    """Local helper: C-style identifier check."""
     if not s:
         return False
-    if s[0] in '-+':
-        rest = s[1:]
-    else:
-        rest = s
-    if rest.startswith('0x') or rest.startswith('0X'):
-        return all(c in '0123456789abcdefABCDEF' for c in rest[2:])
-    if rest and rest[0].isdigit():
-        return rest.isdigit()
-    # Labels starting with '.' (e.g. .Ldone) — also treated as immediates
-    # (i.e. pass-through unchanged).
-    if s.startswith('.'):
-        return True
-    return False
+    if not (s[0].isalpha() or s[0] == '_'):
+        return False
+    return all(c.isalnum() or c == '_' for c in s)

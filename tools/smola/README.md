@@ -1,129 +1,158 @@
 # SMOLA
 
-A Python preprocessor for RISC-V GAS assembly. Adds named registers,
-struct field access, function frame planning, and method calls. Output
-is plain `.s` that standard `riscv64-linux-gnu-as` consumes.
+A Python preprocessor for RISC-V GAS assembly.
 
-SMOLA is the macro-language companion to SMOLR and smold. See
-`spec/Smola_Spec.md` for the full design document; the section
-references below match.
+SMOLA is a clean dialect of RISC-V assembly with:
 
-## Status
+- typed variable declarations that name physical registers
+- struct field access with computed offsets and correct load/store
+  mnemonics
+- scope-based register lifetime management with auto-free
+- function-frame planning (prologue/epilogue emitted from
+  callee-saved usage)
+- strict typo detection — unknown mnemonics are errors
+- comment transfer to the generated `.s`
 
-v0.1 (M1–M4 of the spec's milestone list). All v0.1 features in §2
-are working. Tested entirely on the host (no cross-toolchain
-verification yet — that's the §7 acceptance criterion when binutils
-is available).
+Output is plain `.s` that standard `riscv64-linux-gnu-as` consumes.
+Companion to SMOLR and smold.
 
-Implemented in v0.1:
+## Version
 
-- line-oriented lexer with five line kinds
-- three-pool register allocator (T / S / A) with named bindings,
-  aliases, free-and-reuse semantics
-- struct declarations with natural-alignment layout
-- `.smola.func` / `.smola.endfunc` with frame planning
-- `.smola.method` / `.smola.endmethod` with implicit `self`
-- `LOAD_FIELD`, `STORE_FIELD`, `LA_FIELD`
-- `CALL` with argument-shuffle resolution and cycle detection
-- `!` escape hatch for raw assembly
-- provenance comments in the generated `.s`
+**v0.3.** Hard cut from v0.2: not source-compatible. See spec §10
+for the migration table.
 
-Not yet implemented (deferred per §2.8):
+## At a glance
 
-- inheritance, generics, virtual dispatch
-- scope-tracked destructors
-- `include`
-- conditional assembly via SMOLA (use GAS `.if` as pass-through)
-- RVC-aware register preference (allocator is round-robin in v0.1)
+```asm
+# Point.translate
+# Moves a Point by (dx, dy) in place.
 
-## Layout
-
-```
-spec/Smola_Spec.md      # the design document (start here)
-src/smola/              # the Python package
-    __init__.py
-    lexer.py            # line classification and tokenization
-    regalloc.py         # register pools and named bindings
-    symbols.py          # struct table and field resolution
-    frame.py            # prologue / epilogue planner
-    translator.py       # orchestrator
-    cli.py              # argparse driver
-    errors.py           # SmolaError + subclasses with source locations
-src/bin/smola           # executable entry point
-tests/                  # unit tests + a pytest-free runner
-examples/               # worked .smola sources and their .s outputs
-Makefile                # test + examples + clean targets
-```
-
-## Quick start
-
-```
-make test                  # run all unit tests
-make examples              # translate all examples/*.smola to .s
-
-# Translate one file
-python3 src/bin/smola examples/point.smola --stdout
-```
-
-## A taste
-
-Input (`examples/point.smola`):
-
-```
-.smola.struct Point {
+struct Point {
     x: i64,
     y: i64,
 }
 
-.smola.method Point.translate
-    VAR.A dx
-    VAR.A dy
-    VAR.T cx
-    VAR.T cy
-
-    LOAD_FIELD cx, self, Point.x
-    LOAD_FIELD cy, self, Point.y
-    ADD cx, cx, dx
-    ADD cy, cy, dy
-    STORE_FIELD cx, self, Point.x
-    STORE_FIELD cy, self, Point.y
-.smola.endmethod
+func Point.translate
+    int.a dx
+    int.a dy
+    scope
+        int cx
+        int cy
+        load_field cx, self, Point.x
+        load_field cy, self, Point.y
+        add cx, cx, dx
+        add cy, cy, dy
+        store_field cx, self, Point.x
+        store_field cy, self, Point.y
+    endscope
+end
 ```
 
-Output (key fragment of `examples/point.s`):
+The generated `.s` includes the source comments, an auto-generated
+bindings table at the top of the function, and per-instruction
+provenance comments showing what each line came from.
+
+## Discriminator: content classification
+
+A line is classified by what its first token is:
+
+- `#` or `//` → comment (transferred to `.s`)
+- `<ident>:` or `.L<id>:` → label (passthrough)
+- starts with `.` (not a label) → GAS directive (passthrough)
+- known SMOLA keyword → SMOLA construct
+- known RISC-V mnemonic → instruction (with name substitution)
+- anything else → error: unknown mnemonic
+
+No prefix character is required. Typos become errors at preprocess
+time, with clear diagnostics.
+
+## Keywords
+
+Closed vocabulary. Adding to it requires a spec amendment.
+
+| Keyword family    | Purpose                                       |
+|-------------------|-----------------------------------------------|
+| `func`, `end`     | Function boundaries                           |
+| `scope`, `endscope` | Nested register-lifetime scope              |
+| `struct`          | Struct layout declaration                     |
+| `stack <N>`       | Request raw stack spill space                 |
+| `int`, `ptr`, `flt`, `vec` | Variable declarations                |
+| `int.s`, `int.a`, `flt.s`, `flt.a`, `vec.a` | Storage variants  |
+| `f32`, `f64`      | Float variable with precision marker          |
+| `zap`             | Release a binding                             |
+| `load_field`, `store_field`, `addr_field` | Struct field access   |
+| `raw`             | Escape hatch — emit the tail verbatim         |
+
+## Variable declarations
+
+```asm
+int counter         # caller-saved integer, no init
+int counter 10      # init to 10 via `li`
+int.s persistent    # callee-saved integer (prologue handles save/restore)
+int.a x             # next free argument register (a0..a7)
+int.a y = a3        # pin to specific argument register
+flt gain 0.75       # caller-saved float, init via fmv.w.x (f32 default)
+f64 precise 0.5     # caller-saved double, init via literal pool
+vec data            # caller-saved vector (v1; v0 is reserved for masks)
+```
+
+## Collision detection
+
+Once SMOLA binds a name to a register, raw references to that
+register are errors:
+
+```asm
+int counter
+addi counter, counter, 1   # ok
+addi t0, t0, 1             # ERROR: t0 is bound to counter
+zap counter
+addi t0, t0, 1             # ok now
+```
+
+## Layout
 
 ```
-Point_translate:
-    # smola: bind self -> a0  (argument, implicit)
-    # smola: bind dx -> a1  (argument)
-    # smola: bind dy -> a2  (argument)
-    # smola: bind cx -> t0  (caller-saved)
-    # smola: bind cy -> t1  (caller-saved)
-    ld   t0, 0(a0)    # LOAD_FIELD cx, self, Point.x
-    ld   t1, 8(a0)    # LOAD_FIELD cy, self, Point.y
-    add  t0, t0, a1   # ADD cx, cx, dx
-    add  t1, t1, a2   # ADD cy, cy, dy
-    sd   t0, 0(a0)    # STORE_FIELD cx, self, Point.x
-    sd   t1, 8(a0)    # STORE_FIELD cy, self, Point.y
-    ret               # smola: leaf epilogue
-    .size Point_translate, .-Point_translate
+spec/Smola_Spec.md      # the design document
+src/smola/              # the Python package
+    __init__.py
+    mnemonics.py        # RV mnemonic table (strict typo detection)
+    lexer.py            # content-based line classification
+    regalloc.py         # multi-pool allocator with scope stack
+    symbols.py          # struct table
+    frame.py            # prologue / epilogue planner
+    translator.py       # orchestrator
+    cli.py
+    errors.py
+src/bin/smola           # executable entry point
+tests/                  # 89 unit tests + pytest-free runner
+examples/               # ported v0.3 examples
+Makefile
+README.md
 ```
 
-Leaf-function detection means no prologue overhead. Provenance
-comments on every line make the generated `.s` debuggable in
-isolation. Use `--no-provenance` to drop them.
+## Quick start
 
-## Next steps
+```sh
+make test                  # run unit tests
+make examples              # translate examples to .s
+make check-assembles       # requires riscv64-linux-gnu-as
+```
 
-Per the spec milestones:
+## Status
 
-- **M5**: port a representative subset of `tools/smold/src/core.S` to
-  `.smola` and verify byte-identical objects against the hand-written
-  baseline. This is the load-bearing acceptance test.
-- **M6**: rewrite SMOLR's runtime resolver assembly in SMOLA, once
-  SMOLR Phase 3 lands.
-- **M7**: polish — better diagnostics, optional RVC preference hint
-  in the allocator, optional parallel-move resolver for `CALL`, real
-  `include` support.
+v0.3 implemented:
 
-See `spec/Smola_Spec.md` §8 for the full milestone list.
+- mnemonic table covers RVA23-mandatory extensions
+- all syntax constructs from the spec
+- comment transfer from source to .s
+- auto-generated bindings table per function
+- 89 unit tests passing on host
+
+Not yet:
+
+- assembly verification with the cross toolchain (next milestone)
+- anonymous temporaries (syntax reserved; semantics for v0.4)
+- curated `_v.*` RVV vocabulary (planned v0.4)
+- soft-float ABI
+- `vec` struct fields
+- `include` of other `.smola` files

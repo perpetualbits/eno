@@ -1,0 +1,26 @@
+# render_square — fills a pixel buffer with a solid value.
+# Demonstrates initialization shorthand for int and flt, scoped
+# loops, and the auto-bindings-table at the function head.
+
+func render_square
+    ptr.a fb                       # framebuffer base
+    int.a width                    # pixel count
+    int.a value                    # color value (u32 packed)
+
+    # Walking pointer; counter; gain factor for a hypothetical
+    # follow-up blend step (unused below, here as a demo).
+    ptr cursor
+    int counter 4096
+    flt gain 0.75
+
+    mv cursor, fb
+    mv counter, width
+
+loop:
+    sw value, 0(cursor)            # write one pixel
+    addi cursor, cursor, 4         # next pixel
+    addi counter, counter, -1
+    bnez counter, loop
+
+    zap counter, cursor, gain
+end

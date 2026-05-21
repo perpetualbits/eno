@@ -4,12 +4,11 @@
 import os
 import sys
 
-# Make the smola package importable when run from a source checkout.
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _PARENT = os.path.dirname(_THIS)
 sys.path.insert(0, _PARENT)
 
-from smola.cli import main  # noqa: E402
+from smola.cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

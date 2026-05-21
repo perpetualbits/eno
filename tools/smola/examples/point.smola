@@ -1,21 +1,25 @@
-// Worked example: Point.translate from the spec.
-// Demonstrates struct declaration, method definition, field access.
+# Point.translate
+# Moves a Point by (dx, dy) in place.
+# This demonstrates structs, methods (implicit `self` binding),
+# scoped temporaries that auto-free, and field access.
 
-.smola.struct Point {
+struct Point {
     x: i64,
     y: i64,
 }
 
-.smola.method Point.translate
-    VAR.A dx
-    VAR.A dy
-    VAR.T cx
-    VAR.T cy
+func Point.translate
+    int.a dx
+    int.a dy
+    scope
+        int cx
+        int cy
 
-    LOAD_FIELD cx, self, Point.x
-    LOAD_FIELD cy, self, Point.y
-    ADD cx, cx, dx
-    ADD cy, cy, dy
-    STORE_FIELD cx, self, Point.x
-    STORE_FIELD cy, self, Point.y
-.smola.endmethod
+        load_field cx, self, Point.x
+        load_field cy, self, Point.y
+        add cx, cx, dx                  # apply dx to cx
+        add cy, cy, dy                  # apply dy to cy
+        store_field cx, self, Point.x
+        store_field cy, self, Point.y
+    endscope
+end

@@ -1,48 +1,52 @@
-// Example: a smold-style instruction-length detection helper.
-// Mirrors the M1 smold_insn_length function from the smold design doc.
+# detect_insn_length: classify a RISC-V instruction by its first halfword.
+# Mirrors the M1 smold_insn_length function from the smold design doc.
+#
+# Returns:
+#   a0 = 2  if compressed (16-bit)
+#   a0 = 4  if standard (32-bit)
+#   a0 = 0, a1 != 0  if unsupported length (48-bit+)
+#
+# Encoding rules (RISC-V manual section 1.5):
+#   bits[1:0] != 11      -> 16-bit compressed
+#   bits[1:0] == 11 and
+#     bits[4:2] != 111   -> 32-bit standard
+#   otherwise            -> 48-bit+ (unsupported here)
+#
+# This function is a leaf (no prologue/epilogue beyond `ret`).
+# Note: SMOLA's `zap` is preprocess-time bookkeeping. To release
+# `insn` on multiple branched paths, we zap it once before the
+# branches diverge.
 
-.smola.func detect_insn_length
-    // Input:  a0 = first halfword of the instruction
-    // Output: a0 = 2 if compressed, 4 if standard 32-bit,
-    //                or sets a1 != 0 to signal unsupported length.
-    //
-    // Encoding rules (RISC-V manual section 1.5):
-    //   bits[1:0] != 11      -> 16-bit compressed
-    //   bits[1:0] == 11 and
-    //     bits[4:2] != 111   -> 32-bit standard
-    //   otherwise            -> 48-bit+ (unsupported here)
+func detect_insn_length
+    int.a insn                # first halfword of the instruction
+    int.a unsupported         # output flag; 0 unless we hit a long form
+    scope
+        int low2
+        int low5
 
-    VAR.A insn                    // bound to a0 (input + reused for result)
-    VAR.A unsupported             // bound to a1 (output flag)
-    VAR.T low2
-    VAR.T low5
+        li unsupported, 0     # default: not unsupported
 
-    // Default: not unsupported.
-    LI unsupported, 0
+        andi low2, insn, 3    # decode bits[1:0]
+        li low5, 3
+        bne low2, low5, compressed
 
-    // Check low two bits.
-    ANDI low2, insn, 3
-    LI low5, 3
-    BNE low2, low5, .Lcompressed
+        andi low5, insn, 0x1c # decode bits[4:2]
+        li low2, 0x1c
+        beq low5, low2, longform
+    endscope
 
-    // 32-bit candidate: check bits[4:2].
-    ANDI low5, insn, 0x1c
-    LI low2, 0x1c
-    BEQ low5, low2, .Llong
+    # Zap insn once before the writing branches.
+    zap insn
+    li a0, 4                  # 32-bit standard
+    j done
 
-    // 32-bit standard.
-    LI a0, 4
-    J .Lreturn
+compressed:
+    li a0, 2
+    j done
 
-.Lcompressed:
-    LI a0, 2
-    J .Lreturn
+longform:
+    li unsupported, 1
+    li a0, 0
 
-.Llong:
-    LI unsupported, 1
-    LI a0, 0
-
-.Lreturn:
-    FREE low2
-    FREE low5
-.smola.endfunc
+done:
+end

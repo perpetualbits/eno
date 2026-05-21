@@ -1,16 +1,13 @@
 """Minimal test runner without pytest dependency.
 
-Discovers test_*.py files in the same directory, imports them, finds
-functions starting with test_, runs each one. Reports pass/fail.
-
-Supports a tiny shim for `pytest.raises` used in our tests.
+The same pattern as v0.1 and v0.2. Provides a `pytest` shim with
+`pytest.raises` so test files can use the standard idiom.
 """
 
 import importlib.util
 import os
 import sys
 import traceback
-from contextlib import contextmanager
 
 
 class _RaisesCtx:
@@ -41,21 +38,17 @@ class _RaisesCtx:
 
 
 class _PytestShim:
-    """Minimal pytest shim."""
-
     @staticmethod
     def raises(expected_type, *, match=None):
         return _RaisesCtx(expected_type, match=match)
 
 
-# Make `import pytest` work for our test files.
 sys.modules.setdefault("pytest", _PytestShim())
 
 
 def discover_and_run(test_dir):
     test_dir = os.path.abspath(test_dir)
     sys.path.insert(0, test_dir)
-    # Also add the src directory.
     src_dir = os.path.join(os.path.dirname(test_dir), "src")
     if os.path.isdir(src_dir):
         sys.path.insert(0, src_dir)
@@ -64,7 +57,6 @@ def discover_and_run(test_dir):
         f for f in os.listdir(test_dir)
         if f.startswith("test_") and f.endswith(".py")
     )
-
     passed = 0
     failed = 0
     failures = []
@@ -96,11 +88,10 @@ def discover_and_run(test_dir):
     print(f"Result: {passed} passed, {failed} failed")
     if failed:
         print()
-        print("=" * 70)
         for name, tb in failures:
+            print("=" * 70)
             print(f"FAILURE: {name}")
             print(tb)
-            print("-" * 70)
     return 0 if failed == 0 else 1
 
 
