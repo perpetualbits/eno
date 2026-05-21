@@ -172,7 +172,7 @@ Prototype D:
 5. **The runtime model document** is now overdue. The simulator's
    ad-hoc "tick everyone in topo order, feedback edges see last
    tick's values" works for design validation but is not the
-   eventual real runtime model. A separate `spine_runtime_model.md`
+   eventual real runtime model. A separate `nerve_runtime_model.md`
    should sketch how this maps to threads and cores on K3.
 
 ## Open questions newly relevant

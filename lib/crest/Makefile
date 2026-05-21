@@ -1,4 +1,4 @@
-# lib/wavelet/Makefile
+# lib/crest/Makefile
 #
 # Builds:
 #   build/libwavelet.a       Static library, linked into other ENO components.

@@ -29,7 +29,7 @@ Readers:
 - **NERVE** — uses CREST for runtime rendering of audio segments and
   wavelet-domain graphics effects.
 - **Productions** (e.g. Desert Monument) — use CREST indirectly through
-  `lib/synth`, `lib/fx`, and `lib/gfx`.
+  `lib/siftr`, `lib/fx`, and `lib/gfx`.
 
 ---
 
@@ -73,7 +73,7 @@ crest_3d        3D wavelet transforms for volumetric geometry and
 
 What CREST does **not** do:
 
-- Synthesis scheduling (that is `lib/synth`).
+- Synthesis scheduling (that is `lib/siftr`).
 - Audio effects chains (that is `lib/fx`).
 - WAV I/O (that is `lib/io`).
 - SPINE authoring or emission (that is CARVE).
@@ -188,7 +188,7 @@ crest_bases work begins).
   gain, and cross-square spill.
 - `stamp_simple()` convenience wrapper.
 - WAV I/O and slicing in `lib/io`.
-- Timeline, voice, and mix bus in `lib/synth`.
+- Timeline, voice, and mix bus in `lib/siftr`.
 - BandGain, Reverb (reflector bank), Chorus in `lib/fx`.
 
 ### 4.2 CDF 5/3 lifting: the reference transform
@@ -605,8 +605,8 @@ crest_core  (no dependencies within CREST)
     └── crest_3d      (depends on crest_core, optionally crest_2d)
 
 lib/io      (depends on crest_core)
-lib/synth   (depends on crest_core, lib/io)
-lib/fx      (depends on crest_core, crest_bases, lib/synth, lib/io)
+lib/siftr   (depends on crest_core, lib/io)
+lib/fx      (depends on crest_core, crest_bases, lib/siftr, lib/io)
 lib/gfx     (depends on crest_core, crest_2d, crest_3d)
 
 CARVE       (depends on all CREST modules)
@@ -707,7 +707,7 @@ verifies their outputs match to within 1 ULP.
 
 - Load a WAV file → decompose into 1D squares → reconstruct → save WAV.
   Round-trip error < 1 LSB at 16-bit PCM (already passing via lib/io
-  and lib/synth tests).
+  and lib/siftr tests).
 - Render a CARVE-like workflow: sine atom → timeline → mix bus → reverb
   → WAV. Verify audible content and correct reverb tail (passing via
   lib/fx integration test).
@@ -757,9 +757,10 @@ verifies their outputs match to within 1 ULP.
    wavelet reverb is the active work item. Current lean: use SH up to
    order 4 for the angular part, 1D CDF 5/3 for the radial part.
 
-6. **Repository migration timing.** When does `lib/wavelet/` become
-   `lib/crest/`? Candidate trigger: when `crest_bases` is started (it
-   needs a clear home). Until then, `lib/wavelet/` works fine.
+6. **Repository migration timing.** ~~When does `lib/wavelet/` become
+   `lib/crest/`?~~ Resolved 2026-05-21: directory renamed as part of
+   the Claude Code handoff migration. Internal file renames deferred
+   to crest_bases work session.
 
 ---
 
@@ -769,7 +770,7 @@ verifies their outputs match to within 1 ULP.
 |-----------|----------------|------------------------|
 | CARVE     | All transforms (fitting, hand-tuning, 2D/3D scene work). Primary consumer of crest_bases. | SPINE emission, node-graph UI, ML fitting (Tier 2 Python). |
 | NERVE     | Inverse transforms for audio playback. Subset of crest_bases determined by reachability. Polar wavelet reverb via lib/fx. | SPINE parsing, scheduling, OS interaction. |
-| lib/synth | crest_core: WaveletSquare, stamp, Arena, CDF 5/3. | crest_bases, crest_2d, crest_3d. |
+| lib/siftr | crest_core: WaveletSquare, stamp, Arena, CDF 5/3. | crest_bases, crest_2d, crest_3d. |
 | lib/fx    | crest_core: stamp (for reverb reflector bank). crest_bases: polar basis (when implemented). | Audio effect scheduling. |
 | lib/gfx   | crest_2d: terrain, sand, smoke fields. crest_3d: volumetric cliff/cave geometry. | Audio transforms. |
 | lib/io    | crest_core: WaveletSquare for audio slicing. | All other modules. |
@@ -795,7 +796,7 @@ PROVIDES:
                  For volumetric cliff/cave geometry, SDF fields.
 
 DOES NOT PROVIDE:
-  Synthesis scheduling (lib/synth)
+  Synthesis scheduling (lib/siftr)
   Audio effects chains (lib/fx)
   WAV I/O (lib/io)
   SPINE authoring (CARVE)
@@ -813,7 +814,7 @@ CALLERS:
   NERVE: crest_core + subset of crest_bases (per reachability).
   lib/fx: crest_core (stamp-based reverb) + polar basis (future).
   lib/gfx: crest_2d + crest_3d.
-  lib/synth, lib/io: crest_core only.
+  lib/siftr, lib/io: crest_core only.
 ```
 
 ---

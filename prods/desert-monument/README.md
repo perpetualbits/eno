@@ -12,7 +12,7 @@ shift, scale, rotate, warp, diffuse, filter, render.
 
 ## Status
 
-In planning / prototyping. The wavelet core (`lib/wavelet`) is the first
+In planning / prototyping. The wavelet core (`lib/crest`) is the first
 deliverable. The audio engine, visual engine, and timeline build on it.
 
 ## Layout
