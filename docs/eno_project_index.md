@@ -189,6 +189,21 @@ When a document is added or renamed, update this file in the same session.
 - **Scope:** append-only log of load-bearing decisions, dated.
 - **Status:** living document
 
+### `diary.md`
+
+- **Scope:** Claude Code's running thought-process diary. Narrative
+  entries (broad strokes) explaining the *why* behind non-obvious
+  design choices, discoveries, and trade-offs. Tagged for searchability.
+  Audience: Roland, his daughter, and future crew.
+- **Status:** living document, append-only.
+
+### `CLAUDE.md` (repo root)
+
+- **Scope:** system prompt for Claude Code sessions. Covers role,
+  session-start protocol, subsystem table, workflow rules, coding
+  rules, and project pillars.
+- **Status:** living document. Update when conventions change.
+
 ---
 
 ## 12. Future documents (placeholders)
@@ -208,14 +223,20 @@ When a document is added or renamed, update this file in the same session.
 
 ---
 
-## 13. How chats should use this
+## 13. How sessions should use this
 
-**At the start of a chat:** read this file. Read `eno_decision_log.md`.
-Identify which subsystem the chat is about. Read that subsystem's
-documents.
+**Claude Code sessions** (coding role — see `CLAUDE.md` at repo root):
 
-**During a chat:** when a load-bearing decision is made, log it in
-`eno_decision_log.md` in the same session.
+- At session start: read this file, then `eno_decision_log.md`, then
+  the subsystem document for this session's work area.
+- During: append load-bearing decisions to `eno_decision_log.md`.
+- At end: write a session summary to `docs/sessions/`. Append a diary
+  entry to `docs/diary.md` for any non-obvious reasoning worth
+  preserving.
 
-**At the end of a chat:** produce a session summary file listing all
-files to upload and what each changes.
+**Chat project sessions** (design / architecture role):
+
+- At start: read this file and `eno_decision_log.md`. Read the
+  relevant subsystem doc.
+- During: log decisions in `eno_decision_log.md` in the same session.
+- At end: produce a session summary listing all files to upload.
