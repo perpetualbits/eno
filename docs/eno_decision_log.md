@@ -456,6 +456,36 @@ All five renames executed 2026-05-21 in one atomic migration commit:
 
 ---
 
+## 2026-05-21 — SMOLA external-tooling commitments
+
+*(Full reasoning in `docs/smola_design.md` §13.)*
+
+### SMOLA's design accommodates external tooling integration
+
+- **Source:** SMOLA / ENO continuity chat.
+- **Affects:** `docs/smola_design.md` (new §13), future Rust port.
+- **Reasoning:** SMOLA was conceived for hand-written demo code, but
+  its determinism, strict grammar, and provenance machinery also
+  make it suitable as a stage in automated pipelines (CI, fuzzing,
+  batch compilation, ML candidate-assembly generation). Four hooks
+  are committed to as design requirements: structured JSON
+  diagnostics, batch invocation mode, machine-queryable provenance
+  maps, and determinism as a public guarantee. None ship in v0.3.
+  The Rust port must preserve them; §13.6 carries the checklist.
+  This decision does not change SMOLA's language or behavior — it
+  constrains implementation structure so external use stays open.
+
+### SMOLA added as its own subsystem entry in the project index
+
+- **Source:** SMOLA / ENO continuity chat.
+- **Affects:** `docs/eno_project_index.md`.
+- **Reasoning:** `smola_design.md` is a canonical subsystem document
+  but was previously only referenced obliquely from the SMOLR
+  section. SMOLA gets its own index entry with a notes line
+  referencing §13.
+
+---
+
 ## 2026-05-21 — SMOLA v0.3.1 decisions
 
 *(See `docs/smola_design.md` §2.13 for full spec.)*

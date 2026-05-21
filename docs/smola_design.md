@@ -1011,3 +1011,152 @@ precision or `f32`/`f64` for explicit).
 Accepts any text after the keyword. The text is emitted verbatim
 into the `.s` with leading indentation. No name resolution, no
 collision check. Use sparingly.
+
+## 13. External tooling integration considerations
+
+SMOLA is designed first for hand-written demo code: a person typing
+into a text editor, reading the generated `.s` to learn what
+happened, fixing mistakes. That is the primary use case and the
+spec exists to serve it.
+
+However, SMOLA's structural properties — strict grammar, typed
+declarations, deterministic codegen, propagated provenance — also
+make it a plausible stage in automated pipelines: continuous
+integration, fuzzing, batch compilation, code-generation toolchains,
+and (in particular) machine-learning pipelines that synthesize
+candidate assembly and need a structured front end to compile and
+score it. This section names the hooks that should remain available
+to such pipelines as SMOLA evolves, especially through the future
+Rust port.
+
+These are **considerations**, not features. None of them ship in
+v0.3. They exist here so that the Rust port does not inadvertently
+foreclose them.
+
+### 13.1 Structured diagnostics
+
+Current state: `SmolaError` exits with code 1 and a human-readable
+message on stderr. This is fine for a person at a terminal but
+fragile for automation.
+
+Future hook: a `--diagnostics-json` mode that emits errors as a
+JSON array on stderr (or a separate file) with stable fields:
+
+- error code (stable across versions, documented)
+- source file, line, column
+- severity (error / warning)
+- short message
+- optional structured context (e.g. expected mnemonic class,
+  conflicting binding name)
+
+The Rust port should make this trivial — `serde` plus typed error
+variants get you the JSON shape for free. The Python prototype
+should grow toward this incrementally as automation use cases
+appear.
+
+### 13.2 Batch invocation and fast startup
+
+Current state: SMOLA is a single-file CLI. For interactive use this
+is correct. For pipelines that compile thousands of small candidates
+per training step or per fuzz iteration, Python interpreter startup
+dominates total wall time.
+
+Future hook: a `--batch` mode that reads multiple `(input, output)`
+pairs from a manifest file or stdin and processes them in one
+process, amortizing startup. The interface should be defined now so
+the Rust port adopts it without redesign:
+
+```
+smola --batch manifest.json
+  # manifest.json: [{"in": "a.smola", "out": "a.s"}, ...]
+  # or:
+smola --batch -  # reads NDJSON from stdin
+```
+
+The Rust port largely obviates the need — startup is milliseconds —
+but the `--batch` interface is still useful for pipeline ergonomics
+(one process, one exit code, structured per-job results).
+
+### 13.3 Machine-queryable provenance
+
+Current state: comment provenance is preserved by transferring
+comment text into the generated `.s`. This is human-readable but
+not directly machine-queryable; an external tool that wants to map
+a `.s` line back to its `.smola` origin has to parse comments.
+
+Future hook: a `--provenance-map <file>` mode that emits a separate
+JSON file alongside the `.s`, mapping every emitted `.s` line to:
+
+- source file path
+- source line number
+- source kind (instruction / directive / generated / bindings-table /
+  comment-transfer / prologue / epilogue)
+- the named bindings active at that line, if any
+
+This lets pipelines correlate emitted assembly, profiling output
+(e.g. `spike`/QEMU per-line counts), and the original SMOLA source
+without textual heuristics. It also makes IDE integrations
+(jump-to-source, inline disassembly view) much easier.
+
+The data needed to produce this map already exists inside SMOLA;
+emitting it is plumbing, not new logic.
+
+### 13.4 Determinism as a public guarantee
+
+Already stated in §4.6 and §11 as an internal property. Restated
+here as a guarantee external tooling can rely on:
+
+- Same SMOLA version + same mnemonic table + same input bytes →
+  byte-identical `.s` output.
+- No timestamps, no PID-derived names, no platform-dependent
+  ordering, no nondeterministic iteration over dicts/sets.
+- The mnemonic table version is part of the SMOLA version identity.
+
+The Rust port must preserve this. In particular: `HashMap` iteration
+order is unstable in Rust by default. Where SMOLA's output depends
+on iteration order (bindings table, register pool scan, comment
+flush order), the Rust port must use `BTreeMap`, sorted vectors,
+or explicit insertion-order containers.
+
+A `--version-info` flag emitting SMOLA version, mnemonic-table
+version, and build hash supports reproducibility audits.
+
+### 13.5 What is explicitly out of scope
+
+To prevent §13 from becoming a feature wishlist:
+
+- **SMOLA does not become an API library** in the Python prototype.
+  Pipelines invoke the CLI. The Rust port may expose a library
+  crate later if a concrete pipeline needs it; until then, the CLI
+  is the contract.
+- **SMOLA does not gain a daemon mode** with persistent state
+  between invocations. `--batch` is the only concession to
+  startup-cost concerns.
+- **SMOLA does not score, profile, or otherwise reason about the
+  output `.s`.** That is the consumer's job. SMOLA's contract
+  ends at "deterministic, structured, well-commented `.s` plus
+  optional provenance map."
+- **SMOLA does not target non-RISC-V architectures.** Pipelines
+  that want to generate ARM/x86/etc. assembly can build their own
+  front ends; SMOLA stays RV64-specific.
+
+### 13.6 Rust-port checklist (informational)
+
+When the port happens, the following must be preserved or
+introduced:
+
+- [ ] CLI surface compatible with the Python prototype's flags
+- [ ] Determinism (BTreeMap / sorted iteration where order matters)
+- [ ] Structured diagnostics behind `--diagnostics-json`
+- [ ] `--batch` mode reading a manifest
+- [ ] `--provenance-map` mode emitting JSON line map
+- [ ] `--version-info` exposing SMOLA + mnemonic-table versions
+- [ ] Mnemonic table data file kept as plain data (TOML/JSON/RON),
+      not compiled into source, so it can be updated without a
+      recompile
+- [ ] Byte-identical `.s` output verified against a golden corpus
+      ported from the Python prototype
+
+None of these change SMOLA's language or behavior. They constrain
+how the implementation is structured so it remains usable by
+external tooling.

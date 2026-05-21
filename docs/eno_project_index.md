@@ -112,18 +112,16 @@ When a document is added or renamed, update this file in the same session.
   not prefix-based: a line is recognized by whether its first token is
   a known SMOLA keyword, a known RISC-V mnemonic, a GAS directive, a
   label, or a comment — anything else is an error.
-- **Status:** working draft v0.3 (2026-05-21). Implementation
-  prototype in `tools/smola/` (89 unit tests passing on host;
-  assembly verification with `riscv64-linux-gnu-as` pending toolchain
-  availability).
-- **Notes:** companion to SMOLR and smold. Used to write `.s` for
-  those subsystems' assembly. v0.3 is a hard cut from v0.2; see
-  `smola_design.md` §10 for the migration table. The auto-generated
-  bindings table at the top of each function maps SMOLA variable
-  names back to physical registers in the `.s`, keeping the
-  generated output readable when debugging. Anonymous temporaries
-  (`int 10` without a name) are *reserved syntax* — they error in
-  v0.3 with a hint, holding the namespace for v0.4 semantics.
+- **Status:** v0.3.1 (2026-05-21). Implementation in `tools/smola/`
+  (173 unit tests passing on host; assembly verification with
+  `riscv64-linux-gnu-as` pending toolchain availability).
+- **Notes:** companion to SMOLR and smold. v0.3 is a hard cut from
+  v0.2 (see §10 for migration table). v0.3.1 adds `str`/`cstr`/`txt`
+  string data keywords; see §2.13. §13 lists external-tooling
+  integration hooks (structured diagnostics, batch mode, provenance
+  map, determinism guarantee) that the planned Rust port must
+  preserve. Prototyped in Python; Rust port planned once the language
+  is stable.
 
 ---
 
