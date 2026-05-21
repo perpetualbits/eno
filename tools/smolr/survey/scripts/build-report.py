@@ -24,6 +24,7 @@ from collections import defaultdict, Counter
 
 
 def env_list(name):
+    """Read env var `name` as a whitespace-separated list; exit with error if unset."""
     v = os.environ.get(name, "")
     if not v:
         sys.exit(f"build-report.py: ${name} not set")
@@ -67,10 +68,12 @@ def parse_dynamic(path):
 
 
 def linked(stem):
+    """True if the linked ELF artifact exists for the given build-stem path."""
     return (stem.parent / f"{stem.name}.elf").exists()
 
 
 def header():
+    """Return the Markdown document header for the relocation survey report."""
     return f"""# RISC-V Relocation Survey (SMOLR Phase 1)
 
 Auto-generated from the survey corpus under `tools/smolr/build/survey/`.
@@ -103,6 +106,7 @@ the local toolchain actually accepted.
 
 
 def emit_test_section(test):
+    """Build the Markdown section for one test's relocation matrix and stability summary."""
     out = [f"## Test: `{test}`\n"]
 
     src = Path(f"survey/tests/{test}.c")
@@ -234,6 +238,7 @@ def emit_global_summary():
 
 
 def main():
+    """Generate and print the full relocation survey report to stdout."""
     print(header())
     print(emit_global_summary())
     for test in TESTS:

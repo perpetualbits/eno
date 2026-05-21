@@ -64,6 +64,7 @@ import expand  # noqa: E402
 
 
 def _input(inputs: dict[str, Any], port: str, default: float = 0.0) -> float:
+    """Return the float value of `port` from inputs, or `default` if absent or None."""
     v = inputs.get(port, default)
     if v is None:
         return default
@@ -71,10 +72,12 @@ def _input(inputs: dict[str, Any], port: str, default: float = 0.0) -> float:
 
 
 def _event_input(inputs: dict[str, Any], port: str) -> bool:
+    """Return True if the event port fired this tick, False otherwise."""
     return bool(inputs.get(port, False))
 
 
 def tick_oscillator(params, inputs, state, dt, t):
+    """Tick a band-limited oscillator (sine/square/sawtooth/triangle). Returns {"out": sample}."""
     freq = float(params.get("freq", 440.0))
     mod = _input(inputs, "freq_mod")  # additive in Hz
     phase = state.get("phase", 0.0)
@@ -96,6 +99,7 @@ def tick_oscillator(params, inputs, state, dt, t):
 
 
 def tick_lfo(params, inputs, state, dt, t):
+    """Tick a low-frequency oscillator with amplitude and offset scaling. Returns {"out": value}."""
     # LFO is structurally the same as oscillator but outputs a `value`
     # with amplitude+offset (so it can sweep a cutoff between e.g. 200
     # and 800 Hz without rescaling on the way).
@@ -120,10 +124,12 @@ def tick_lfo(params, inputs, state, dt, t):
 
 
 def tick_noise(params, inputs, state, dt, t):
+    """Tick a white-noise source. Returns a uniformly random sample in [-1, 1]."""
     return {"out": random.uniform(-1.0, 1.0)}
 
 
 def tick_clock(params, inputs, state, dt, t):
+    """Tick a clock node. Fires a trigger event once per 1/rate seconds."""
     rate = float(params.get("rate", 1.0))
     mod = _input(inputs, "rate_mod")
     eff_rate = max(0.01, rate + mod)
@@ -137,6 +143,7 @@ def tick_clock(params, inputs, state, dt, t):
 
 
 def tick_dice(params, inputs, state, dt, t):
+    """Tick a sample-and-hold randomizer. Picks a new value on each incoming trigger."""
     triggered = _event_input(inputs, "trigger")
     if triggered:
         unipolar = bool(params.get("unipolar", False))
@@ -151,6 +158,7 @@ def tick_dice(params, inputs, state, dt, t):
 
 
 def tick_envelope(params, inputs, state, dt, t):
+    """Tick an ADSR envelope. Autoreleases from sustain after the decay time."""
     triggered = _event_input(inputs, "trigger")
     attack = float(params.get("attack", 0.01))
     decay = float(params.get("decay", 0.1))
@@ -195,6 +203,7 @@ def tick_envelope(params, inputs, state, dt, t):
 
 
 def tick_lowpass(params, inputs, state, dt, t):
+    """Tick a 1-pole IIR lowpass filter. Coefficient is derived from cutoff frequency."""
     # 1-pole IIR: y = a*x + (1-a)*y_prev, where a comes from cutoff.
     sig = _input(inputs, "in")
     cutoff = float(params.get("cutoff", 1000.0))
@@ -211,6 +220,7 @@ def tick_lowpass(params, inputs, state, dt, t):
 
 
 def tick_highpass(params, inputs, state, dt, t):
+    """Tick a 1st-order IIR highpass filter."""
     # Simple 1st-order highpass.
     sig = _input(inputs, "in")
     cutoff = float(params.get("cutoff", 100.0))
@@ -227,11 +237,13 @@ def tick_highpass(params, inputs, state, dt, t):
 
 
 def tick_filter(params, inputs, state, dt, t):
+    """Tick the generic Prototype-B filter (simulated as a lowpass for now)."""
     # The generic Prototype-B filter. Treat as lowpass for simulation.
     return tick_lowpass(params, inputs, state, dt, t)
 
 
 def tick_delay(params, inputs, state, dt, t):
+    """Tick a delay line with feedback. Buffer length tracks the modulated delay time."""
     sig = _input(inputs, "in")
     time = float(params.get("time", 0.1))
     feedback = float(params.get("feedback", 0.0))
@@ -257,6 +269,7 @@ def tick_delay(params, inputs, state, dt, t):
 
 
 def tick_allpass_delay(params, inputs, state, dt, t):
+    """Tick a first-order allpass filter: y = -g*x + x_d + g*y_d."""
     # First-order allpass:  y = -g*x + x_d + g*y_d
     sig = _input(inputs, "in")
     time = float(params.get("time", 0.05))
@@ -286,6 +299,7 @@ def tick_allpass_delay(params, inputs, state, dt, t):
 
 
 def tick_gain(params, inputs, state, dt, t):
+    """Tick a gain node: multiply the input signal by gain * gain_mod."""
     sig = _input(inputs, "in")
     g = float(params.get("gain", 1.0))
     mod = _input(inputs, "gain_mod", default=1.0)
@@ -293,6 +307,7 @@ def tick_gain(params, inputs, state, dt, t):
 
 
 def tick_mixer(params, inputs, state, dt, t):
+    """Tick a mixer: sum all connected inN inputs and divide by count for unity gain."""
     # Sum all connected `inN` inputs. Divide by count for unity gain.
     s = 0.0
     n = 0
@@ -306,6 +321,7 @@ def tick_mixer(params, inputs, state, dt, t):
 
 
 def tick_passthrough(params, inputs, state, dt, t):
+    """Tick a terminal node (patch.output / patch.scene_out): pass through the input signal."""
     # patch.output and patch.scene_out — terminal nodes.
     return {"out": _input(inputs, "in")}
 
@@ -314,6 +330,7 @@ def tick_passthrough(params, inputs, state, dt, t):
 # the graph as sources, but Prototype C does not simulate event-driven
 # music expansion through the patch — that's Prototype D+ territory.
 def tick_music_passthrough(params, inputs, state, dt, t):
+    """Placeholder tick for music dialect nodes, which are not simulated in Prototype C."""
     return {}
 
 
@@ -597,6 +614,7 @@ def simulate(
 
 
 def render_summary(result: SimResult) -> str:
+    """Format per-probe statistics and warnings as a human-readable summary string."""
     lines = []
     lines.append(
         f"# simulation: {result.ticks} ticks at {result.rate_hz} Hz "
@@ -643,6 +661,7 @@ def render_trace(
 
 
 def render_csv(result: SimResult) -> str:
+    """Render the full simulation trace as a CSV string (one row per tick)."""
     import io
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -658,6 +677,7 @@ def render_csv(result: SimResult) -> str:
 
 
 def main() -> int:
+    """CLI entry point: parse arguments, run the simulation, and emit results."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("file", help="path to .spine file")
     ap.add_argument("--root", default="demo_root",

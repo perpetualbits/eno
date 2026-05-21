@@ -621,6 +621,7 @@ _PITCH_BASE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 
 
 def pitch_to_midi(p: str) -> int:
+    """Convert scientific pitch notation (e.g. "C4", "D#3", "Bb2") to a MIDI note number."""
     m = _PITCH_RE.match(p)
     if not m:
         raise ValueError(f"bad pitch: {p!r}")
@@ -634,6 +635,7 @@ def pitch_to_midi(p: str) -> int:
 
 
 def midi_to_pitch(m: int) -> str:
+    """Convert a MIDI note number to scientific pitch notation (e.g. 60 → "C4")."""
     names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     octave = (m // 12) - 1
     return f"{names[m % 12]}{octave}"
@@ -1178,10 +1180,12 @@ def lifetime_of(type_id: str) -> str | None:
 
 
 def is_cello_entity(type_id: str | None) -> bool:
+    """True if type_id belongs to the cello dialect (starts with "cello.")."""
     return type_id is not None and type_id.startswith("cello.")
 
 
 def is_cello_gesture(type_id: str | None) -> bool:
+    """True if type_id is a cello base gesture (starts with "cello.gesture.")."""
     return type_id is not None and type_id.startswith("cello.gesture.")
 
 
@@ -1420,6 +1424,7 @@ def resolve_patch_graph(
 def is_mod_targeting_patch(
     sid: str, table: dict[str, Statement]
 ) -> bool:
+    """True if the MOD chain rooted at sid ultimately derives from a patch DEF."""
     cur = sid
     while cur in table and table[cur].kind == "MOD":
         cur = table[cur].src_id

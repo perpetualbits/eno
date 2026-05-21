@@ -11,6 +11,8 @@ import traceback
 
 
 class _RaisesCtx:
+    """Context manager asserting that a specific exception is raised."""
+
     def __init__(self, expected_type, match=None):
         self.expected_type = expected_type
         self.match = match
@@ -38,6 +40,8 @@ class _RaisesCtx:
 
 
 class _PytestShim:
+    """Minimal shim that makes `pytest.raises` work without pytest installed."""
+
     @staticmethod
     def raises(expected_type, *, match=None):
         return _RaisesCtx(expected_type, match=match)
@@ -47,6 +51,7 @@ sys.modules.setdefault("pytest", _PytestShim())
 
 
 def discover_and_run(test_dir):
+    """Find and run every test_*.py file in test_dir; report pass/fail counts."""
     test_dir = os.path.abspath(test_dir)
     sys.path.insert(0, test_dir)
     src_dir = os.path.join(os.path.dirname(test_dir), "src")
