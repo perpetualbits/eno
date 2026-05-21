@@ -76,9 +76,10 @@ Closed vocabulary. Adding to it requires a spec amendment.
 | `scope`, `endscope` | Nested register-lifetime scope              |
 | `struct`          | Struct layout declaration                     |
 | `stack <N>`       | Request raw stack spill space                 |
-| `int`, `ptr`, `flt`, `vec` | Variable declarations                |
-| `int.s`, `int.a`, `flt.s`, `flt.a`, `vec.a` | Storage variants  |
-| `f32`, `f64`      | Float variable with precision marker          |
+| `int`, `ptr`, `vec` | Default variable declarations               |
+| `f32`, `f64`      | Float variable declarations (precision explicit) |
+| `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64` | Width-typed integer declarations (documentation) |
+| `*.s`, `*.a`      | Storage variants (callee-saved, argument)     |
 | `zap`             | Release a binding                             |
 | `load_field`, `store_field`, `addr_field` | Struct field access   |
 | `raw`             | Escape hatch — emit the tail verbatim         |
@@ -88,13 +89,56 @@ Closed vocabulary. Adding to it requires a spec amendment.
 ```asm
 int counter         # caller-saved integer, no init
 int counter 10      # init to 10 via `li`
+u8 byte_counter     # width-typed (documentation only)
+u32 phase 0x80000000  # width-typed with init
 int.s persistent    # callee-saved integer (prologue handles save/restore)
 int.a x             # next free argument register (a0..a7)
 int.a y = a3        # pin to specific argument register
-flt gain 0.75       # caller-saved float, init via fmv.w.x (f32 default)
+f32 gain 0.75       # caller-saved float, init via fmv.w.x
 f64 precise 0.5     # caller-saved double, init via literal pool
 vec data            # caller-saved vector (v1; v0 is reserved for masks)
 ```
+
+The width-typed integer keywords (`i8`/`u8`/.../`u64`) all allocate
+from the integer register file — the register is 64-bit physically
+on RV64. The declared width appears in the bindings table at the
+function head as documentation:
+
+```
+# smola: bindings —
+#   byte_counter: t0 (u8, t)
+#   phase: t1 (u32, t)
+#   counter: t2 (int, t)
+```
+
+## Data sections
+
+In a data section (`.data`, `.rodata`, `.bss`), the type keywords
+introduce labeled data blocks with automatic alignment:
+
+```asm
+.section .rodata
+
+coefs:
+    f32  0.5  0.75  1.0
+         0.25  0.125
+
+deltas:
+    i16  -3  1  2  -1  0  1
+
+dispatch_table:
+    ptr  handler_a  handler_b  handler_c
+    ptr  handler_d  handler_e  handler_f
+```
+
+SMOLA emits `.balign`, the right storage directive per value
+(`.byte`/`.hword`/`.word`/`.dword`/`.float`/`.double`), and `.size`
+after each labeled block. Numeric continuation lines are
+auto-detected; symbolic references require the type keyword on
+each line.
+
+`int` and `vec` are forbidden in data sections — must commit to
+a width. `i8` through `u64`, `f32`, `f64`, and `ptr` are allowed.
 
 ## Collision detection
 

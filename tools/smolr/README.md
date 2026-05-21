@@ -52,7 +52,7 @@ Tier 1 is the daily-driver target. Tier 2 is the showcase target for the
 benchmark wins. Tier 0 keeps us honest about ISA assumptions and may matter
 again if SMOLR ever grows a bare-metal mode for the Duo S.
 
-Note: lib/wavelet already uses `RISCV_MARCH = rv64gcv_zba_zbb` for its
+Note: lib/crest already uses `RISCV_MARCH = rv64gcv_zba_zbb` for its
 cross-build. SMOLR matches that exactly for Tier 1, with `_zbs` added because
 RVA22 mandates it.
 

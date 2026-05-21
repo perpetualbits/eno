@@ -1,8 +1,9 @@
-# SPINE Runtime Model
+# NERVE — Runtime Model
 
 **Status:** Skeleton v0.1. Stub document.
 **Project:** Epsilon Null Operation (ε₀)
-**Companion to:** `spine_core_v0_2_design.md` (and forward to v0.3+)
+**Runtime name:** NERVE (named 2026-05-17; see `eno_decision_log.md`)
+**Companion to:** `spine_core_v0_3_design.md`
 
 ---
 

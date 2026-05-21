@@ -12,6 +12,6 @@ Audio effects, all expressed as stamp clusters in wavelet space.
   use_per_band_gain path).
 - **Distortion / saturation**: applied in coefficient space.
 
-Depends on `lib/wavelet` and `lib/core`.
+Depends on `lib/crest` and `lib/core`.
 
 Currently empty placeholder.

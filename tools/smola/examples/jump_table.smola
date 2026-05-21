@@ -1,0 +1,59 @@
+# jump_table.smola
+#
+# Demonstrates a `ptr`-typed data block holding symbol references
+# (a classic jump table) and an indirect call into it.
+#
+# Note: continuation lines (a second line of jump targets without a
+# `ptr` keyword repeat) are NOT supported when the values are
+# symbolic. SMOLA's continuation rule only kicks in for numeric
+# literals. For symbolic data, repeat the type keyword on each line.
+
+.section .rodata
+
+dispatch_table:
+    ptr  handle_a  handle_b  handle_c
+    ptr  handle_d  handle_e  handle_f
+
+.section .text
+
+# dispatch — given an opcode in a0 (0..5), jump to the matching
+# handler. The table sits in .rodata and is reached via la + ld.
+func dispatch
+    int.a opcode
+    ptr table
+    ptr target
+
+    la table, dispatch_table       # base of the jump table
+    slli target, opcode, 3         # opcode * 8 (sizeof ptr)
+    add target, table, target
+    ld target, 0(target)           # load the handler address
+    zap opcode, table              # free a0 and the base
+    jr target                      # tail-call the handler
+end
+
+# Placeholder handlers — each just sets a0 to its own number and
+# returns. In a real program these would do meaningful work.
+
+func handle_a
+    li a0, 0
+end
+
+func handle_b
+    li a0, 1
+end
+
+func handle_c
+    li a0, 2
+end
+
+func handle_d
+    li a0, 3
+end
+
+func handle_e
+    li a0, 4
+end
+
+func handle_f
+    li a0, 5
+end

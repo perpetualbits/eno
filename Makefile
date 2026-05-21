@@ -3,9 +3,9 @@
 # Builds libraries first, then tools, then productions.
 # Each subdirectory has its own Makefile and is independently buildable.
 
-# Library order matters: gfx/synth/fx/io depend on core and wavelet.
-LIBS  = lib/core lib/wavelet lib/io lib/synth lib/fx lib/gfx
-TOOLS = tools/waveviz tools/shaderbake tools/smolr
+# Library order matters: gfx/siftr/fx/io depend on core and crest.
+LIBS  = lib/core lib/crest lib/io lib/siftr lib/fx lib/gfx
+TOOLS = tools/carve tools/glint tools/smolr
 PRODS = prods/desert-monument
 
 ALL_DIRS = $(LIBS) $(TOOLS) $(PRODS)

@@ -28,7 +28,7 @@ third_party/  Vendored external code (libsndfile, SDL2 headers, etc.).
 
 4. **No dependencies pointing upward.** Productions depend on libs.
    Tools may depend on libs. Libs depend on each other in a strict order:
-   core → wavelet → io → synth → fx → gfx. No cycles.
+   core → crest → io → siftr → fx → gfx. No cycles.
 
 5. **C11 for portability + asm where it matters.** The prototype is plain
    C. Performance-critical kernels (CDF 5/3 lifting, stamping inner loop)
@@ -43,7 +43,7 @@ third_party/  Vendored external code (libsndfile, SDL2 headers, etc.).
 - Math primitives (fast sin/cos tables, fixed-point helpers if needed)
 - Logging / assertions for development builds
 
-### lib/wavelet
+### lib/crest — CREST
 - 1D wavelets: CDF 5/3, Daubechies-N (planned)
 - Chirplets (planned)
 - 2D and 3D wavelet transforms (planned)
@@ -55,8 +55,8 @@ third_party/  Vendored external code (libsndfile, SDL2 headers, etc.).
 - Raw asset bundling for the final demo (turning files into linkable blobs)
 - Possibly OGG decoding for full-length audio in dev builds
 
-### lib/synth
-- Stamp-based synthesis built on lib/wavelet
+### lib/siftr — SIFTR
+- Stamp-based synthesis built on lib/crest
 - Envelope generators
 - Oscillator banks
 - Voice management
@@ -74,16 +74,13 @@ third_party/  Vendored external code (libsndfile, SDL2 headers, etc.).
 
 ## Tool responsibilities
 
-### tools/waveviz
-The audio/wavelet design GUI. Visualises:
-- Time-domain waveforms
-- Wavelet coefficient grids per square
-- I/Q channel state
-- Stamp timeline
-- Live audition of edits
+### tools/carve — CARVE
+The offline authoring tool for instrument trajectory templates and 3D scene
+definitions. ML fitting, node-graph UI, IR baking for polar wavelet reverb.
+See `carve_design.md` for the full design.
 
-### tools/shaderbake
-GLSL minification and packing for size-coded productions.
+### tools/glint — GLINT
+GLSL shader minifier and packer for size-coded productions.
 
 ### tools/smolr
 Planned: Linux/RISC-V executable packer, analogous to crinkler (Windows)
@@ -119,3 +116,9 @@ make clean     Wipe build artifacts.
 - New tool: same pattern under `tools/`.
 - New production: `prods/<slug>/`. Its Makefile should reference libraries
   via `../../lib/<name>/include` and `../../lib/<name>/build/lib<name>.a`.
+
+## Current library dependency chain
+
+```
+lib/core  ←  lib/crest  ←  lib/io  ←  lib/siftr  ←  lib/fx  ←  lib/gfx
+```

@@ -1,6 +1,6 @@
-# lib/wavelet
+# lib/crest — CREST wavelet library
 
-The ENO wavelet library. Builds to `build/libwavelet.a`.
+The ENO wavelet transform library. Builds to `build/libwavelet.a`.
 
 ## Current state
 
@@ -48,4 +48,4 @@ make clean      Remove build/.
 #include "wavelet.h"
 ```
 
-Link `lib/wavelet/build/libwavelet.a` and `-lm`.
+Link `lib/crest/build/libwavelet.a` and `-lm`.

@@ -3,7 +3,7 @@
 **Status:** working draft v0.1
 **Project:** Epsilon Null Operation (ε₀)
 **Companion to:** `spine_audio_dialect.md`, `spine_core_v0_3_design.md`,
-`spine_runtime_model.md`, `eno_project_index.md`,
+`nerve_runtime_model.md`, `eno_project_index.md`,
 `eno_decision_log.md`.
 
 ---

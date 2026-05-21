@@ -171,8 +171,8 @@ coefficient manipulation per scale for artistic control.
 
 ## 4. Module: crest_core (existing)
 
-**File:** `lib/wavelet/src/wavelet.c` → will be renamed to
-`lib/crest/src/crest_core.c` in the repository migration.
+**File:** `lib/crest/src/wavelet.c` (to be renamed `crest_core.c` when
+crest_bases work begins).
 
 **Status: implemented and tested (26 tests passing).**
 
@@ -582,26 +582,16 @@ The boundary between CREST and `lib/fx` for the polar reverb:
 
 ---
 
-## 9. Repository location and migration
+## 9. Repository location
 
-Current state: the working code lives in `lib/wavelet/`. The subsystem
-was built before CREST was named. Migration plan:
+The library lives at `lib/crest/`. The directory rename from `lib/wavelet/`
+was completed 2026-05-21 as part of the Claude Code handoff migration.
 
-1. Rename `lib/wavelet/` → `lib/crest/` in the repository.
-2. Rename source files:
-   - `wavelet.h` → `crest.h` (public API)
-   - `wavelet.c` → `crest_core.c`
-   - `test_wavelet.c` → `test_crest_core.c`
-3. Update all `#include "wavelet.h"` references in `lib/io`, `lib/synth`,
-   `lib/fx`.
-4. Update Makefiles.
-5. Update `eno_project_index.md` (this document is the CREST entry).
-
-Until the migration is done, `lib/wavelet/` is the canonical location.
-Do not create a parallel `lib/crest/` — rename, don't duplicate.
-
-The migration is mechanical and should be done as one atomic commit.
-It is not urgent; the code works where it is.
+Internal file names (`wavelet.h`, `wavelet.c`, `test_wavelet.c`,
+`libwavelet.a`) retain the `wavelet` prefix for now. The next crest_bases
+work session is the natural moment to rename them to `crest.h`,
+`crest_core.c`, `test_crest_core.c`, `libcrest.a` along with the first
+`#include "crest.h"` consumers in `lib/siftr` and `lib/fx`.
 
 ---
 

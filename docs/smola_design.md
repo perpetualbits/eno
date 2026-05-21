@@ -35,8 +35,8 @@ End-user code now looks like plain assembly with a few extra keywords:
 func render_square
     ptr src
     ptr dst
-    int counter 4096
-    flt gain 0.75
+    u32 counter 4096
+    f32 gain 0.75
 
 loop:
     lw t0, 0(src)               # load source pixel
@@ -49,6 +49,26 @@ loop:
     zap counter
 end
 ```
+
+Data sections work the same way — typed declarations introduce
+labeled blocks with automatic alignment:
+
+```asm
+.section .rodata
+
+# Delta-coded i16 wavelet coefficients for one sub-band.
+band_coefs:
+    i16  -3   1   2  -1   0   1
+          0  -1   2   1  -3   2
+
+# CDF 5/3 reconstruction taps.
+cdf53_taps:
+    f32  -0.0625  0.5625  0.5625  -0.0625
+```
+
+SMOLA emits the right `.balign` and `.size` directives. Forgetting
+alignment in data sections is one of the most error-prone parts of
+hand-written RISC-V assembly; SMOLA handles it automatically.
 
 Everything else from v0.2 (typed variable pools, struct fields,
 scope-based register lifetimes, collision detection, frame planning)
@@ -166,37 +186,68 @@ The closed vocabulary. Editing this list requires a spec amendment.
 
 #### Struct declarations
 
-- `struct <Name> { <fields> }` — declare a struct layout. Same
-  semantics as v0.2: natural alignment, primitive field types
+- `struct <Name> { <fields> }` — declare a struct layout. Natural
+  alignment, primitive field types
   (`i8`/`u8`/`i16`/`u16`/`i32`/`u32`/`i64`/`u64`/`f32`/`f64`/`ptr`).
 
-#### Variable declarations (replace v0.2's `_var.*`)
+#### Variable declarations
 
-Form: `<type> <name> [<initializer>]`
+Form: `<type> <name> [<initializer>]` for code-section variables,
+where `<type>` is one of:
 
-- `int counter` — allocate a caller-saved integer register, name it
-  `counter`.
-- `int counter 10` — same, then emit `li counter, 10` to initialize.
-- `ptr base` — allocate a caller-saved integer register, document as
-  pointer.
-- `flt gain 0.75` — allocate an FP register, emit initialization
-  (currently a placeholder; loading a float immediate requires a
-  small literal pool; see §2.4).
-- `vec data` — allocate a vector register.
+| Keyword                                     | Meaning                          |
+|---------------------------------------------|----------------------------------|
+| `int`                                       | integer register, default        |
+| `i8`/`u8`/`i16`/`u16`/`i32`/`u32`/`i64`/`u64` | integer register, declared width |
+| `ptr`                                       | integer register, pointer-typed  |
+| `f32`                                       | FP register, single precision    |
+| `f64`                                       | FP register, double precision    |
+| `vec`                                       | vector register                  |
 
-By default, variable declarations claim **caller-saved (temporary)**
-storage. To claim callee-saved or argument storage:
+The width-typed integer variants (`i8`/`u8`/.../`u64`) allocate from
+the same pool as `int` — the integer register file on RV64 is 64-bit
+physically. The declared width is **documentation only**: it appears
+in the auto-generated bindings table at the function head and serves
+to communicate intent to readers, but it does not affect register
+allocation or instruction emission and is not enforced when the user
+writes width-mixed instructions.
+
+A future v0.4 may use the declared width to drive default load/store
+mnemonic inference (`load counter, 0(src)` picking `lbu` because
+`counter` is declared `u8`); v0.3 reserves the documentation hook
+but does not yet implement that feature.
+
+`flt` was a v0.2/early-v0.3 keyword that has been **removed**.
+Always write `f32` or `f64` to declare a float variable. The lexer
+catches `flt` with a migration hint.
+
+Examples:
+
+```asm
+int counter         # default integer
+u8 byte_counter     # width-typed (8-bit, documentation)
+u16 phase_index     # width-typed (16-bit)
+i32 signed_count    # width-typed (signed 32-bit)
+ptr base            # pointer
+f32 gain 0.75       # f32 with initialization
+f64 precise 0.5     # f64 with initialization
+int counter 10      # default integer with initialization
+```
+
+By default, declarations claim **caller-saved (temporary)** storage.
+To claim callee-saved or argument storage, append `.s` or `.a`:
 
 - `int.s persistent` — callee-saved integer (`s0`..`s11`).
-- `int.a x` — next free argument register (`a0`..`a7`).
+- `u8.a byte_arg` — argument register, width-typed.
 - `int.a x = a3` — pin to a specific argument register.
+- `f32.s saved_gain` — callee-saved float.
 
-The dot-suffix replaces v0.2's `_var.t` / `_var.s` / `_var.a`. The
-common case (caller-saved temporary) needs no suffix.
+All width keywords accept both suffixes. `vec.s` is forbidden (no
+callee-saved vector registers in the RVV ABI).
 
 #### `zap <name>[, <name>...]`
 
-Release one or more named bindings. Replaces v0.2's `_free`.
+Release one or more named bindings.
 
 Behavior:
 - removes the symbolic binding
@@ -209,59 +260,80 @@ Behavior:
 #### `stack <N>`
 
 Inside a function, request `N` extra bytes of user-controlled stack
-space. Same as v0.2.
+space.
 
 ### 2.4 Variable initialization
 
-v0.3 adds initialization syntax that emits an instruction at
-declaration:
+Typed declarations can include an initializer that emits one or two
+instructions at declaration time.
 
-| Declaration               | Emitted                                  |
-|---------------------------|------------------------------------------|
-| `int counter`             | (nothing — declaration only)             |
-| `int counter 10`          | `li counter, 10`                         |
-| `int counter 0xDEAD`      | `li counter, 0xdead`                     |
-| `ptr base`                | (nothing)                                |
-| `flt gain 0.75`           | see below — requires literal pool        |
-| `vec data`                | (nothing)                                |
+| Declaration                     | Emitted                                   |
+|---------------------------------|-------------------------------------------|
+| `int counter`                   | (nothing — declaration only)              |
+| `int counter 10`                | `li counter, 10`                          |
+| `u32 phase 0xDEADBEEF`          | `li phase, 0xDEADBEEF`                    |
+| `i64 total 0`                   | `li total, 0`                             |
+| `ptr base`                      | (nothing — declaration only)              |
+| `f32 gain 0.75`                 | bit-pattern + `fmv.w.x`; see below        |
+| `f64 precise 0.5`               | literal-pool + `la`+`fld`; see below      |
+| `vec data`                      | (nothing — declaration only)              |
+
+For integer initialization, GAS's `li` pseudo-instruction handles
+arbitrary-width constants via the right sequence (`lui`+`addi` or
+`addi`+`slli`+`addi` for wider values). The width-typed variants
+(`u8`, `i32`, etc.) emit the same `li` — the declared width is
+documentation; SMOLA does not mask or truncate the literal to the
+declared width.
 
 For floating-point initialization, RISC-V has no "load immediate"
-instruction equivalent to `li`. The standard idioms are:
+equivalent to `li`. Two idioms:
 
-- Load from a `.rodata` literal pool: `la t0, .Lconst_0p75; flw gain,
-  0(t0)`.
-- Synthesize via integer bit pattern: `li tN, 0x3f400000; fmv.w.x
-  gain, tN` for f32.
+- **Bit pattern + integer move** (used for `f32`): SMOLA computes
+  the IEEE 754 single-precision bit pattern of the literal, emits
+  `li tN, 0xBITPATTERN` (using a transient integer temporary), then
+  `fmv.w.x reg, tN`. Fully inline.
+- **Literal pool** (used for `f64`): SMOLA emits an entry at the
+  end of the function's `.text.<func>` section and loads via
+  `la tN, .Lflt_N; fld reg, 0(tN)`. The pool entry is invisible
+  unless you read the generated `.s`.
 
-v0.3 chooses the bit-pattern synthesis path for `f32` and the literal-
-pool path for `f64`. Both happen at preprocess time; the user just
-writes `flt gain 0.75` and SMOLA emits the right sequence. f32 is
-fully inline; f64 emits a literal pool entry at the end of the
-function's `.text.<func>` section.
+Both happen at preprocess time. The user just writes `f32 gain 0.75`
+or `f64 precise 0.5` and SMOLA emits the right sequence.
 
-This is the first SMOLA construct that *emits an instruction at
+This is the SMOLA construct that *emits an instruction at
 declaration*. v0.2's `_var.t` was pure bookkeeping. The new behavior
-is documented explicitly because it represents a small departure from
-the "declarations are free" principle: declarations are still
-*deterministic* and *zero-cost-beyond-what-you'd-have-written*, but
+is documented explicitly: declarations are still *deterministic*
+and *zero-cost-beyond-what-you-would-have-written-by-hand*, but
 they can now have side effects.
 
-### 2.5 Anonymous temporaries (reserved syntax)
+### 2.5 Anonymous declarations (reserved syntax)
 
 The form `int 10` (a type and an initializer with no name) is
-*reserved* for v0.4 anonymous temporaries. v0.3 errors on this
-syntax with a hint:
+**reserved**. v0.3 errors on this syntax with a hint:
 
 ```
-foo.smola:42: error: anonymous temporaries reserved for v0.4
+foo.smola:42: error: anonymous declarations reserved for v0.4
         int 10
-hint: name the binding explicitly: 'int tmp 10'
+hint: name the binding explicitly (e.g. 'int tmp 10'); in data
+sections, a label is required
 ```
 
-This holds the namespace without committing to semantics. The right
-semantics for anonymous temporaries (single-use? scoped to next
-mnemonic? expression-like?) is a design question that needs concrete
-use cases to resolve.
+Reserved in two contexts:
+
+- **In a code section**, this would be an anonymous temporary
+  binding. Reserved because the right semantics (single-use? scoped
+  to next mnemonic? expression-like?) needs concrete use cases to
+  resolve, and we haven't seen any yet in real ENO code.
+
+- **In a data section**, this would be an anonymous data block
+  (data without a preceding label). Reserved because anonymous data
+  blocks are hard to reference (no symbol to load) and a label
+  always costs nothing. We may add anonymous data later for reset
+  vectors or section-prefix data layouts; we wait for the concrete
+  use case.
+
+Both reservations hold the namespace without committing to
+semantics.
 
 ### 2.6 Methods are just functions
 
@@ -345,14 +417,178 @@ comment notes the rawness.
 ### 2.11 What v0.3 does NOT have
 
 - Inheritance, generics, virtual dispatch.
-- Anonymous temporaries (§2.5 reserved syntax).
+- Anonymous declarations in code or data (§2.5 reserved syntax).
 - `vec` struct fields (use raw RVV instructions for vector load/store).
+- Struct-typed data declarations (you cannot write "a `Point` in
+  `.rodata`" with a struct keyword; lay out the fields manually using
+  the primitive widths).
 - `include` of other `.smola` files.
 - Conditional assembly via SMOLA (use GAS `.if`/`.endif`).
 - Soft-float ABI.
 - The curated `_v.*` RVV vocabulary mentioned in v0.2's milestone list.
   Raw RVV instructions pass through cleanly; the vocabulary lands when
   a concrete wavelet kernel needs it.
+
+### 2.12 Data-section declarations
+
+When the current section is a data section, type keywords gain a
+second meaning: they introduce **labeled data blocks**. SMOLA emits
+correct alignment, the right GAS storage directive per value, and
+a `.size` directive after each block.
+
+A section is a "data section" if its name starts with any of
+`.data`, `.rodata`, `.bss`, `.tdata`, `.tbss` (matching both the
+section itself and any sub-section like `.rodata.cst8`). The default
+section at file start is `.text` (code).
+
+#### Syntax
+
+```
+<label>:
+    <type>  <value> [<value> ...]
+            [<value> <value> ...]    ; continuation lines (numeric only)
+```
+
+#### Type keywords allowed in data
+
+| Keyword          | GAS directive | Size | Alignment |
+|------------------|---------------|------|-----------|
+| `i8` / `u8`      | `.byte`       | 1    | 1         |
+| `i16` / `u16`    | `.hword`      | 2    | 2         |
+| `i32` / `u32`    | `.word`       | 4    | 4         |
+| `i64` / `u64`    | `.dword`      | 8    | 8         |
+| `f32`            | `.float`      | 4    | 4         |
+| `f64`            | `.double`     | 8    | 8         |
+| `ptr`            | `.dword`      | 8    | 8         |
+
+#### Type keywords NOT allowed in data
+
+- `int` — must commit to a width. Use `i64` or `u64` for 8-byte
+  integers, `i32`/`u32` for 4-byte, etc.
+- `vec` — vector data has no fixed width independent of its
+  elements. Use the underlying scalar type; vector loads
+  (`vle32.v` etc.) want element-aligned data, which `f32`/`u16`/etc.
+  provides.
+- Storage-suffixed forms (`i8.s`, `f32.a`, ...) — storage classes
+  describe register lifetimes; they're meaningless in data.
+
+#### Emitted output
+
+Source:
+```asm
+.section .rodata
+
+coefs:
+    f32  0.5  0.75  1.0
+         0.25  0.125
+```
+
+Output:
+```asm
+    .section .rodata
+coefs:
+    .balign 4
+    .float 0.5
+    .float 0.75
+    .float 1.0
+    .float 0.25
+    .float 0.125
+    .size coefs, 20
+```
+
+The `.balign` directive uses the type's natural alignment. The
+`.size` directive reflects the total bytes written under the label
+(elements × size). Multiple type-changes under one label accumulate
+into the size:
+
+```asm
+mixed_block:
+    i16  -3  1  2     ; 6 bytes
+    f32  0.5  0.75    ; 8 bytes
+```
+
+emits `.size mixed_block, 14`. (Note: SMOLA does not account for
+GAS-inserted alignment padding between the `i16` block and the `f32`
+block. If you care about exact byte sizes across width transitions,
+arrange your block so naturally-larger alignments come first.)
+
+#### Continuation lines
+
+A line whose first token is a numeric literal (decimal, hex, signed,
+or floating-point) is treated as a **continuation** of the preceding
+data directive. The values are emitted with the same GAS directive
+as the original line.
+
+Continuation works for numeric values:
+
+```asm
+deltas:
+    i16  -3  1  2  -1
+         0  1  -2  3      ; continues i16
+```
+
+Continuation does **not** work for symbol references. For symbolic
+data (e.g. jump tables), repeat the type keyword on each line:
+
+```asm
+dispatch_table:
+    ptr  handler_a  handler_b  handler_c
+    ptr  handler_d  handler_e  handler_f
+```
+
+This is a deliberate limitation: SMOLA distinguishes numeric
+continuations from "unknown mnemonic" typos purely by syntactic
+shape, and an identifier like `handler_a` is shape-indistinguishable
+from a typo. Requiring the type keyword on symbol-reference lines
+keeps the typo detection strict.
+
+A new label terminates any pending continuation context: values
+under the new label require a fresh type keyword.
+
+#### Comments in data sections
+
+Block comments and end-of-line comments work the same as in code
+sections: they transfer to the generated `.s`. A block comment
+between two labeled data blocks attaches to the *following* label
+in source order:
+
+```asm
+.section .rodata
+
+band_coefs:
+    i16  -3  1  2
+
+# CDF 5/3 reconstruction taps. f32 because the kernel uses single
+# precision throughout.
+cdf53_taps:
+    f32  -0.0625  0.5625  0.5625  -0.0625
+```
+
+The `.size band_coefs, ...` directive is emitted *before* the
+comment for `cdf53_taps`, keeping the documentation associated with
+the correct block.
+
+#### Labels are mandatory
+
+A data declaration must be preceded by a label. Anonymous data is
+reserved (§2.5).
+
+#### Section transitions
+
+When `.section` switches to a new section, any open data block has
+its `.size` directive flushed before the new section begins. So a
+sequence like:
+
+```asm
+.section .rodata
+data:
+    i32 42
+.section .text
+func use_it
+    ...
+```
+
+emits `.size data, 4` *before* the `.section .text` directive.
 
 ## 3. Worked example
 
@@ -596,9 +832,11 @@ Hard cut.
 | `_var.s int x`                | `int.s x`                           |
 | `_var.a int x`                | `int.a x`                           |
 | `_var.a int x = a3`           | `int.a x = a3`                      |
-| `_var.t flt g`                | `flt g`                             |
+| `_var.t flt g`                | `f32 g` (or `f64 g`; `flt` removed) |
 | `_var.t vec v`                | `vec v`                             |
-| (no init form)                | `int x 10`, `flt g 0.75`            |
+| (no init form)                | `int x 10`, `f32 g 0.75`            |
+| (no width-typed integer form) | `u8 x`, `i32 phase`, etc. (doc only)|
+| (no data-section semantics)   | `f32 0.5 0.75 ...` in `.rodata`     |
 | `_free name`                  | `zap name`                          |
 | `_load_field`                 | `load_field`                        |
 | `_store_field`                | `store_field`                       |
@@ -608,6 +846,17 @@ Hard cut.
 | `! raw line`                  | `raw line` (or just the line itself)|
 | any unknown SMOLA `_keyword`  | error                               |
 | any unknown lowercase mnemonic| was passthrough → now error         |
+
+Two notes on the refinements (added during the second 2026-05-21
+session):
+
+- The `flt` keyword was removed. Use `f32` or `f64` explicitly.
+  The lexer catches `flt` with a migration hint.
+- Width-typed integer keywords (`i8`/`u8`/`i16`/`u16`/`i32`/`u32`/
+  `i64`/`u64`) were added to the variable-declaration vocabulary.
+  They allocate from the same pool as `int`; the declared width
+  appears in the bindings table as documentation. v0.3 does not
+  enforce the width on instructions; that's a v0.4 hook.
 
 The v0.2 examples in `examples/` are replaced with v0.3 versions.
 The v0.2 sources are not preserved in the project; retrieve from git

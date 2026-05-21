@@ -1,6 +1,6 @@
-# tools/shaderbake
+# tools/glint — GLINT
 
-GLSL shader minification and packing for size-coded productions.
+GLSL shader minifier and packer for size-coded productions.
 
 ## Planned features
 

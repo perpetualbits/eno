@@ -36,10 +36,74 @@ from . import __version__
 from .errors import (CollisionError, FrameError, ParseError,
                      RegAllocError, SmolaError, SourceLoc, StructError)
 from .frame import FramePlan, emit_epilogue, emit_prologue, plan_frame
-from .lexer import Line, LineKind, lex_source
+from .lexer import Line, LineKind, SMOLA_KEYWORDS, lex_source
 from .regalloc import (Allocator, Binding, Storage, VarType,
                        is_register_name, normalize_reg)
 from .symbols import SymbolTable, define_struct
+
+
+# Subset of SMOLA_KEYWORDS that introduce a variable declaration.
+# Computed once at module load by intersecting the full keyword set
+# with the set of type-leading tokens. The dispatch in `_handle_smola`
+# does a single hash lookup against this set.
+#
+# What counts as "type-leading":
+#   - integer family: int, i8, u8, i16, u16, i32, u32, i64, u64
+#   - pointer: ptr
+#   - float: f32, f64
+#   - vector: vec
+# Each may carry .s or .a storage suffix; the base + suffix forms
+# were already enumerated when SMOLA_KEYWORDS was built.
+VAR_DECL_KEYWORDS = frozenset(
+    kw for kw in SMOLA_KEYWORDS
+    if kw.split('.')[0] in {
+        "int", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
+        "ptr", "f32", "f64", "vec",
+    }
+)
+
+
+# Width-typed integer keyword bases (without any storage suffix).
+# Used by the data-declaration handler to map type names to GAS
+# storage directives and natural alignments.
+DATA_TYPE_INFO = {
+    # Type name : (GAS directive, size in bytes, alignment in bytes)
+    "i8":  (".byte",   1, 1),
+    "u8":  (".byte",   1, 1),
+    "i16": (".hword",  2, 2),
+    "u16": (".hword",  2, 2),
+    "i32": (".word",   4, 4),
+    "u32": (".word",   4, 4),
+    "i64": (".dword",  8, 8),
+    "u64": (".dword",  8, 8),
+    "f32": (".float",  4, 4),
+    "f64": (".double", 8, 8),
+    "ptr": (".dword",  8, 8),
+    # NOTE: `int` and `vec` are deliberately absent. Data must commit
+    # to a concrete width; `int` is ambiguous (use i64 or u64) and
+    # `vec` has no fixed width independent of its elements (use the
+    # underlying scalar type).
+}
+
+
+# Section-name prefixes that classify a section as a *data* section
+# rather than a code section. SMOLA tracks the current section by
+# observing `.section` GAS directives; if the name starts with one
+# of these prefixes, data-declaration semantics activate. The default
+# section at file start is `.text` (code).
+_DATA_SECTION_PREFIXES = (".data", ".rodata", ".bss", ".tdata", ".tbss")
+
+
+def _is_data_section(name: str) -> bool:
+    """Is `name` (the section name from a `.section` directive) a
+    data section?
+
+    Matches any prefix in _DATA_SECTION_PREFIXES, including
+    sub-sections like `.rodata.cst8` (which GAS uses for constant
+    pools).
+    """
+    return any(name == p or name.startswith(p + ".")
+               for p in _DATA_SECTION_PREFIXES)
 
 
 # Regex for `imm(reg)` memory operands. Imm is optional (atomics use
@@ -112,33 +176,61 @@ def _looks_like_immediate(s: str) -> bool:
     return False
 
 
-def _parse_var_keyword(keyword: str) -> Tuple[VarType, Storage]:
-    """Parse a SMOLA variable keyword like `int`, `int.s`, `flt.a`,
-    `f32`, `f64.s` into a (VarType, Storage) pair.
+def _parse_var_keyword(keyword: str) -> Tuple[VarType, Storage, str]:
+    """Parse a SMOLA variable keyword into (VarType, Storage, declared_width).
 
-    Default storage is T (caller-saved temporary). The `f32` / `f64`
-    forms are treated as `flt` for allocation purposes; the precision
-    distinction affects only initialization emission.
+    Accepts the v0.3-refined vocabulary:
+
+      - `int`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`
+        → VarType.INT
+      - `ptr` → VarType.PTR
+      - `f32`, `f64` → VarType.FLT
+      - `vec` → VarType.VEC
+
+    Each may carry a `.s` (callee-saved) or `.a` (argument) suffix.
+    Default storage is T (caller-saved temporary).
+
+    The width-typed integer variants (`i8`, `u8`, `i16`, ...) all
+    allocate from the integer register pool — the integer register
+    file on RV64 is 64-bit physically and SMOLA doesn't try to
+    enforce sub-word widths at instruction level. The declared width
+    is returned as the third tuple element ("documentation width")
+    for inclusion in the bindings table at the function head and
+    for future width-aware default load/store inference (a v0.4
+    feature; the hook exists now even though it isn't wired).
+
+    The `declared_width` string is the base keyword as the user
+    wrote it ("int", "i8", "u32", "ptr", "f32", "f64", "vec").
+    It survives into the Binding for documentation purposes.
+
+    Note: `flt` was removed in the v0.3 refinements. The lexer
+    catches it earlier with a migration hint, so this function
+    never sees `flt` in practice.
     """
     # Split off any storage suffix.
     base, _, suffix = keyword.partition('.')
 
-    # The base maps to a VarType. f32/f64 share the flt pool.
-    type_map = {
-        "int": VarType.INT,
-        "ptr": VarType.PTR,
-        "flt": VarType.FLT,
-        "f32": VarType.FLT,
-        "f64": VarType.FLT,
-        "vec": VarType.VEC,
-    }
-    if base not in type_map:
-        # Shouldn't reach here — the lexer's SMOLA_KEYWORDS check
-        # already filtered.
+    # Integer family. All map to VarType.INT for allocation; the
+    # declared width is documentation.
+    int_family = ["int", "i8", "u8", "i16", "u16",
+                  "i32", "u32", "i64", "u64"]
+    if base in int_family:
+        var_type = VarType.INT
+    elif base == "ptr":
+        var_type = VarType.PTR
+    elif base == "f32":
+        var_type = VarType.FLT
+    elif base == "f64":
+        var_type = VarType.FLT
+    elif base == "vec":
+        var_type = VarType.VEC
+    else:
+        # Defensive: the lexer should have already filtered to known
+        # SMOLA keywords. If we get here it's a SMOLA bug, not user
+        # error.
         raise ParseError(
             None, f"unknown variable type keyword {keyword!r}",
         )
-    var_type = type_map[base]
 
     if suffix == "":
         storage = Storage.T
@@ -151,7 +243,7 @@ def _parse_var_keyword(keyword: str) -> Tuple[VarType, Storage]:
             None, f"unknown storage suffix .{suffix!r}",
             hint="use .s for callee-saved or .a for argument",
         )
-    return var_type, storage
+    return var_type, storage, base
 
 
 @dataclass
@@ -197,6 +289,28 @@ class Translator:
         # next `func`.
         self.pending_comments: List[str] = []
 
+        # Data-section state. SMOLA tracks the current section by
+        # observing `.section` GAS directives as they stream past.
+        # The default at file start is `.text` (code). When the
+        # section is a data section, the type keywords (i8, u8, ...
+        # f32, f64, ptr) gain a second meaning: they introduce
+        # labeled data blocks. A line whose first token is a numeric
+        # literal (LineKind.DATA_VALUES) is accepted as a
+        # continuation of a previously-emitted data directive.
+        self.current_section: str = ".text"
+        # Most recent label emitted in the current data section, or
+        # None. Used for the `.size` directive after a data block.
+        self.current_data_label: Optional[str] = None
+        # Bytes written since the most recent data label. Drives the
+        # `.size` directive.
+        self.current_data_label_bytes: int = 0
+        # Type info of the most recent data directive, or None. Used
+        # to interpret DATA_VALUES continuation lines: they emit
+        # values of the same type as the directive they continue.
+        # Tuple of (gas_directive, element_size, element_alignment,
+        # keyword) — the keyword preserved for diagnostics.
+        self.pending_data_type: Optional[Tuple[str, int, int, str]] = None
+
     # ----- entry point -----
 
     def translate(self, source: str) -> str:
@@ -210,6 +324,8 @@ class Translator:
         # Any trailing pending comments at EOF flush as top-level
         # output.
         self._flush_pending_comments(target="output")
+        # Any open data block at EOF gets its .size flushed.
+        self._flush_data_label_size()
         if self.current_func is not None:
             raise FrameError(
                 self.current_func.declared_at,
@@ -246,6 +362,17 @@ class Translator:
             # The func handler will attach pending_comments to the
             # FuncCtx and clear the buffer.
             pass
+        elif (line.kind == LineKind.LABEL
+                and _is_data_section(self.current_section)
+                and self.current_data_label is not None):
+            # Special case: a new label in a data section ends the
+            # previous block's data. We want the `.size` directive
+            # to appear right after the data, BEFORE any block
+            # comment that documents the next label. Otherwise the
+            # `.size` line drifts into the comment block for the
+            # next label and the attribution looks confused.
+            self._flush_data_label_size()
+            self._flush_pending_comments(target="auto")
         else:
             self._flush_pending_comments(target="auto")
 
@@ -260,6 +387,9 @@ class Translator:
             return
         if line.kind == LineKind.SMOLA:
             self._handle_smola(line)
+            return
+        if line.kind == LineKind.DATA_VALUES:
+            self._handle_data_values(line)
             return
 
         # Shouldn't reach here — every LineKind is handled above.
@@ -296,26 +426,92 @@ class Translator:
     # ----- label / GAS directive / raw RV instruction -----
 
     def _handle_label(self, line: Line) -> None:
+        """Process a `<label>:` line.
+
+        Three contexts:
+        - Inside a function (code section): register the label name so
+          branch operands can resolve it without a `.L` prefix.
+        - In a data section: this label becomes the `current_data_label`,
+          which the next data directive will associate values with.
+          Any previous data block in this section gets its `.size`
+          directive flushed first.
+        - Top-level (.text but no function): just emit the label.
+        """
         # If we're inside a function, register this label so branch
         # operands can resolve it.
         if self.current_func is not None:
             self.current_func.declared_labels.add(line.head)
+
+        # In a data section, a new label terminates any previous data
+        # block (we emit its `.size`). The new label becomes the
+        # current_data_label and the byte counter resets to 0.
+        if _is_data_section(self.current_section):
+            self._flush_data_label_size()
+            self.current_data_label = line.head
+            self.current_data_label_bytes = 0
+            # A label in a data section also terminates any pending
+            # continuation context — values after a new label can only
+            # be a new data directive (or a real RV-mnemonic style
+            # error).
+            self.pending_data_type = None
+
         text = f"{line.head}:"
         if line.trailing_comment:
             text += f"    {line.trailing_comment}"
         self._emit_to_current(text)
 
     def _handle_gas_directive(self, line: Line) -> None:
+        """Process a GAS directive (starts with `.`).
+
+        Side effect: if the directive is `.section`, update
+        `current_section`. We also flush any pending data-block size
+        on section change, because a section switch closes whatever
+        data block was open.
+        """
         # Pass-through with collision check. GAS directives rarely
         # reference registers, but `.equ counter, 0x10` could.
         if self.current_func is not None:
             self._check_collisions(line)
+
+        # Detect a `.section` and update our notion of current
+        # section. The directive's tail starts with the section name,
+        # possibly followed by flags and a comma-separated list. We
+        # take the first comma-separated token as the section name.
+        if line.head == ".section":
+            new_section = line.tail.split(',')[0].strip()
+            # Flush any pending data-block size before transitioning.
+            self._flush_data_label_size()
+            self.current_section = new_section
+            self.current_data_label = None
+            self.current_data_label_bytes = 0
+            self.pending_data_type = None
+
         body = f"    {line.head}"
         if line.tail:
             body += f" {line.tail}"
         if line.trailing_comment:
             body += f"    {line.trailing_comment}"
         self._emit_to_current(body)
+
+    def _flush_data_label_size(self) -> None:
+        """If there is an active data label with accumulated bytes,
+        emit its `.size` directive and reset the counter.
+
+        Called at:
+          - section change (.section directive)
+          - new label in a data section
+          - EOF
+        The flush is a no-op if there is no current data label or if
+        no bytes were written under it.
+        """
+        if (self.current_data_label is not None
+                and self.current_data_label_bytes > 0):
+            self.output_lines.append(
+                f"    .size {self.current_data_label}, "
+                f"{self.current_data_label_bytes}"
+            )
+            self.current_data_label = None
+            self.current_data_label_bytes = 0
 
     def _handle_rv_insn(self, line: Line) -> None:
         # Special-case `call`: a tail with no commas is a raw call;
@@ -410,12 +606,13 @@ class Translator:
             self._set_user_spill(line)
             return
 
-        # Variable declarations. Bare type keywords: int, ptr, flt,
-        # vec, f32, f64, and their .s/.a suffixed variants.
-        if head in ("int", "ptr", "flt", "vec",
-                    "int.s", "int.a", "ptr.s", "ptr.a",
-                    "flt.s", "flt.a", "vec.a",
-                    "f32", "f64", "f32.s", "f32.a", "f64.s", "f64.a"):
+        # Variable declarations. Bare type keywords:
+        #   int, ptr, vec, f32, f64,
+        #   i8/u8/i16/u16/i32/u32/i64/u64,
+        # plus their .s and .a suffixed variants. The set is computed
+        # once at module load (below) so the dispatch is just a hash
+        # check.
+        if head in VAR_DECL_KEYWORDS:
             self._handle_var_decl(line)
             return
 
@@ -495,10 +692,12 @@ class Translator:
         header.append(f"{emit_name}:")
         ctx.header_lines = header
 
-        # Implicit self binding for methods.
+        # Implicit self binding for methods. Declared as `ptr` so
+        # the bindings table reads `self: a0 (ptr, a)`.
         if is_method:
             ctx.alloc.alloc("self", VarType.PTR, Storage.A,
-                            explicit_reg="a0", loc=line.loc)
+                            explicit_reg="a0", loc=line.loc,
+                            declared_width="ptr")
 
         self.current_func = ctx
 
@@ -548,13 +747,22 @@ class Translator:
         """Build the auto-generated bindings table comment block.
 
         Lists every named variable that lived in the function, in
-        declaration order, with its physical register and type.
-        Bindings inside nested scopes get a (scope N) annotation.
+        declaration order, with its physical register, declared type
+        (the keyword the user wrote: `int`, `u8`, `f32`, `ptr`, ...),
+        and storage class. Bindings inside nested scopes get a (scope
+        N) annotation.
 
         Internal SMOLA-generated transient bindings (names starting
         with `.smola_`) are filtered out — they exist for one or two
         instructions during float initialization and would just be
         noise in the user-facing table.
+
+        The declared-width string is what makes the bindings table
+        readable: a binding shown as `counter: t0 (u32, t)` tells
+        the user immediately that `counter` was meant to hold a 32-
+        bit unsigned value. Without it, the bindings table could
+        only say `counter: t0 (int, t)` and the user would have to
+        scan the code to recover the width intent.
         """
         # Filter user bindings only.
         user_bindings = [b for b in history
@@ -566,9 +774,15 @@ class Translator:
             scope_suffix = ""
             if b.scope_depth > 1:
                 scope_suffix = f", scope {b.scope_depth}"
+            # Prefer the user's declared width keyword over the
+            # internal var_type. Fall back to var_type for bindings
+            # constructed without a declared_width (e.g. the implicit
+            # `self -> a0` in method functions, which uses var_type
+            # alone).
+            type_str = b.declared_width if b.declared_width else b.var_type.value
             lines.append(
                 f"    #   {b.name}: {b.reg} "
-                f"({b.var_type.value}, {b.storage.value}{scope_suffix})"
+                f"({type_str}, {b.storage.value}{scope_suffix})"
             )
         return lines
 
@@ -656,44 +870,89 @@ class Translator:
     # ----- variable declarations -----
 
     def _handle_var_decl(self, line: Line) -> None:
-        """Parse and handle `int name`, `int name init`, `int.s name`,
-        `int.a name = a3`, etc."""
+        """Dispatch to either the code-section variable declaration
+        handler or the data-section data-declaration handler based
+        on the current section.
+
+        The same keywords (`i8`, `u8`, ... `f64`, `ptr`, plus `int`,
+        `vec`, and storage suffixes) have two meanings:
+          - In a code section: declare a variable bound to a register.
+          - In a data section: declare a labeled data block.
+
+        `int` and `vec` are forbidden in data declarations (the user
+        must commit to a width); the data handler rejects them with
+        a helpful hint.
+        """
+        if _is_data_section(self.current_section):
+            self._handle_data_decl(line)
+        else:
+            self._handle_code_var_decl(line)
+
+    def _handle_code_var_decl(self, line: Line) -> None:
+        """Parse and handle code-section variable declarations.
+
+        Examples (each shows the new keyword vocabulary):
+
+          int x                  # default integer
+          u8 byte_counter        # width-typed (documentation)
+          ptr base               # pointer
+          f32 gain 0.75          # f32 with init
+          f64 precise 0.5        # f64 with init
+          int.s persistent       # callee-saved
+          int.a x = a3           # pinned argument
+          i32 counter 10         # width-typed with init
+
+        The width-typed integer variants (i8/u8/i16/.../u64) all
+        allocate from VarType.INT — the integer register file is
+        64-bit on RV64 regardless of declared width. The declared
+        width is stored on the Binding (via Allocator.alloc) and
+        surfaces in the bindings table at the function head.
+        """
         ctx = self._ensure_func(line)
         keyword = line.head
-        # Determine (var_type, storage) from the keyword.
+
+        # The lexer only routes lines whose first token is in
+        # VAR_DECL_KEYWORDS here, so this call cannot fail on unknown
+        # keywords. It can still fail on a malformed `.suffix`, which
+        # would be a SMOLA bug since SMOLA_KEYWORDS already only
+        # contains valid suffixes.
         try:
-            var_type, storage = _parse_var_keyword(keyword)
+            var_type, storage, declared_width = _parse_var_keyword(keyword)
         except ParseError as e:
-            # Re-raise with proper source location.
             raise ParseError(line.loc, e.message, hint=e.hint)
 
-        # Distinguish base from precision modifier (f32, f64 default
-        # the flt precision; we remember it for init emission).
-        base, _, _ = keyword.partition('.')
-        precision = base if base in ("f32", "f64") else None
-        # `flt` without precision defaults to f32 for initialization.
-        if base == "flt":
-            precision = "f32"
+        # Float-precision tracking for init emission. f32 produces
+        # the inline `li`+`fmv.w.x` sequence; f64 emits a literal
+        # pool entry and `la`+`fld`. For non-float types this is
+        # None.
+        precision = declared_width if declared_width in ("f32", "f64") else None
 
         # Parse the tail. Allowed shapes:
         #   <name>
         #   <name> <initializer>
-        #   <name> = <reg>        (only for .a storage)
-        #   <initializer>          (anonymous — reserved for v0.4)
+        #   <name> = <reg>          (only for .a storage)
+        #   <initializer>            (anonymous — reserved for v0.4)
         tail = line.tail.strip()
         if tail == "":
             raise ParseError(
                 line.loc, f"`{keyword}` requires a variable name",
             )
 
-        # Check for the reserved anonymous form: a tail that looks like
-        # an immediate with no preceding identifier.
+        # Check for the reserved anonymous form: tail's first token
+        # is a numeric literal, not an identifier. v0.3 reserves this
+        # syntax — in *code* for v0.4 anonymous temporaries, in *data*
+        # it would be anonymous data (also reserved pending a
+        # concrete use case; labels always allowed and recommended).
         first_token = tail.split()[0] if tail.split() else ""
         if _looks_like_immediate(first_token) and not _is_ident(first_token):
             raise ParseError(
                 line.loc,
-                "anonymous temporaries reserved for v0.4",
-                hint=f"name the binding explicitly: '{keyword} tmp {first_token}'",
+                "anonymous declarations reserved for v0.4",
+                hint=(
+                    f"name the binding explicitly (e.g. "
+                    f"'{keyword} tmp {first_token}'); "
+                    "in data sections, a label is required"
+                ),
             )
 
         # Check for explicit pinning syntax (only .a storage).
@@ -721,26 +980,28 @@ class Translator:
             name = tokens[0]
             initializer = tokens[1].strip() if len(tokens) > 1 else None
 
-        # Allocate the register.
+        # Allocate the register and stash the declared-width string
+        # on the Binding for later display in the bindings table.
         reg = ctx.alloc.alloc(name, var_type, storage,
-                              loc=line.loc, explicit_reg=explicit_reg)
+                              loc=line.loc, explicit_reg=explicit_reg,
+                              declared_width=declared_width)
 
-        # Emit a brief inline provenance comment. The full bindings
-        # table is emitted at end-of-function; this inline comment
-        # documents the binding at its declaration site for readers
-        # who scroll through the .s linearly.
+        # Inline provenance comment at the declaration site.
         if self.emit_provenance:
             storage_label = {
                 Storage.T: "temp",
                 Storage.S: "saved",
                 Storage.A: "arg",
             }[storage]
-            type_label = precision if precision else var_type.value
+            # The visible type uses the declared width (i.e. what the
+            # user wrote). "int" stays "int", "u8" stays "u8", "f32"
+            # stays "f32" — preserves the user's intent.
             ctx.body_lines.append(
-                f"    # smola: {name} -> {reg} ({type_label}, {storage_label})"
+                f"    # smola: {name} -> {reg} "
+                f"({declared_width}, {storage_label})"
             )
 
-        # Handle initialization if present.
+        # Initialization, if present.
         if initializer is not None:
             self._emit_var_init(ctx, line, name, reg, var_type, precision,
                                  initializer)
@@ -851,6 +1112,213 @@ class Translator:
             f"# smola: init {name}"
         )
         ctx.alloc.zap(tmp_name, loc=line.loc)
+
+    # ----- data-section declarations -----
+
+    def _handle_data_decl(self, line: Line) -> None:
+        """Handle a type keyword used as a data declaration.
+
+        Syntax in a data section:
+
+            <label>:
+                <type>  <value> [<value> ...]
+                        [<value> <value> ...]    ; continuation lines
+
+        Where `<type>` is one of i8/u8/i16/u16/i32/u32/i64/u64/f32/
+        f64/ptr. `int` and `vec` are deliberately not allowed —
+        data must commit to a width.
+
+        Emits:
+          1. A `.balign <align>` directive matching the type's
+             natural alignment (only when needed: not emitted if the
+             current byte position is already aligned, but we
+             conservatively always emit it because the byte position
+             across `.section` switches is hard to track).
+          2. One GAS directive per value (`.byte`, `.hword`, `.word`,
+             `.dword`, `.float`, `.double`).
+          3. Updates `current_data_label_bytes` so the eventual
+             `.size` directive is correct.
+
+        Sets `pending_data_type` so a following DATA_VALUES line is
+        recognized as a continuation.
+
+        Errors:
+          - `int` or `vec` in data: hint to use a width-typed
+            keyword.
+          - storage-suffixed forms (`i8.s`, `f32.a`) in data: these
+            only make sense in code (they refer to register storage
+            classes); reject with a hint.
+          - empty tail: data declaration requires at least one value.
+          - no preceding label: reserved for v0.4.
+        """
+        keyword = line.head
+
+        # Storage-suffixed forms are meaningless in data sections.
+        if '.' in keyword:
+            base, _, suffix = keyword.partition('.')
+            raise ParseError(
+                line.loc,
+                f"storage suffix `.{suffix}` is not valid in a data section",
+                hint=(
+                    f"use the bare type form (e.g. `{base}` instead of "
+                    f"`{keyword}`); storage classes are for code variables"
+                ),
+            )
+
+        # `int` and `vec` are forbidden in data.
+        if keyword == "int":
+            raise ParseError(
+                line.loc,
+                "`int` is not allowed in data sections",
+                hint=(
+                    "commit to a width: use `i64`/`u64` for 8-byte "
+                    "integers, or `i32`/`u32` for 4-byte, etc."
+                ),
+            )
+        if keyword == "vec":
+            raise ParseError(
+                line.loc,
+                "`vec` is not allowed in data sections",
+                hint=(
+                    "use the underlying scalar type (e.g. `f32` for an "
+                    "array of single-precision floats); vector loads "
+                    "want element alignment, which the scalar type gives"
+                ),
+            )
+
+        # Look up the type info.
+        if keyword not in DATA_TYPE_INFO:
+            # This shouldn't happen — only keywords in VAR_DECL_KEYWORDS
+            # reach _handle_var_decl, and the `int`/`vec`/storage-suffix
+            # cases were filtered above. Defensive.
+            raise ParseError(
+                line.loc,
+                f"`{keyword}` cannot be used as a data declaration",
+                hint=f"valid types: {', '.join(sorted(DATA_TYPE_INFO))}",
+            )
+        directive, elem_size, elem_align = DATA_TYPE_INFO[keyword]
+
+        # Parse values from the tail.
+        if not line.tail.strip():
+            raise ParseError(
+                line.loc,
+                f"`{keyword}` data declaration requires at least one value",
+            )
+        # Values are whitespace-separated. We don't split on commas
+        # because the user may or may not use commas; we accept both.
+        values = self._split_data_values(line.tail)
+        if not values:
+            raise ParseError(
+                line.loc,
+                f"`{keyword}` data declaration requires at least one value",
+            )
+
+        # Require a preceding label. Anonymous data is reserved.
+        if self.current_data_label is None:
+            raise ParseError(
+                line.loc,
+                "data declarations require a preceding label",
+                hint=(
+                    "add a label on the line before the data directive; "
+                    "anonymous data is reserved for v0.4"
+                ),
+            )
+
+        # Emit `.balign` once per directive. This is conservative — we
+        # could track byte position and skip the balign when already
+        # aligned — but the cost is one zero-byte padding directive
+        # that GAS optimizes away anyway in many cases.
+        self.output_lines.append(f"    .balign {elem_align}")
+
+        # Emit one directive per value. Each value passes through
+        # verbatim — SMOLA doesn't validate float syntax or symbol
+        # references; GAS reports any real malformation.
+        for v in values:
+            self.output_lines.append(f"    {directive} {v}")
+        self.current_data_label_bytes += elem_size * len(values)
+
+        # Trailing comment.
+        if line.trailing_comment:
+            # Attach to the last value line for readability.
+            self.output_lines[-1] += f"    {line.trailing_comment}"
+
+        # Set continuation context: subsequent DATA_VALUES lines are
+        # values of the same type.
+        self.pending_data_type = (directive, elem_size, elem_align, keyword)
+
+    def _handle_data_values(self, line: Line) -> None:
+        """Process a DATA_VALUES line (first token was a numeric
+        literal).
+
+        Only valid in a data section as a continuation of a previously-
+        emitted data directive. Outside that context (in code, or in
+        a data section before any directive), error like the lexer
+        would have if it didn't recognize the line at all.
+        """
+        if not _is_data_section(self.current_section):
+            raise ParseError(
+                line.loc,
+                f"unknown mnemonic or keyword {line.head!r}",
+                hint=(
+                    "numeric literals at the start of a line are only "
+                    "valid as data continuation in a data section"
+                ),
+            )
+        if self.pending_data_type is None:
+            raise ParseError(
+                line.loc,
+                "data continuation line with no preceding data directive",
+                hint=(
+                    "data continuation lines must follow a `<type> <value>` "
+                    "directive that establishes the value type"
+                ),
+            )
+        directive, elem_size, elem_align, keyword = self.pending_data_type
+
+        # Re-assemble the values: line.head was the first value
+        # (because DATA_VALUES means the first token was a literal),
+        # and line.tail is the rest of the line.
+        full_text = (line.head + " " + line.tail) if line.tail else line.head
+        values = self._split_data_values(full_text)
+        if not values:
+            # Shouldn't happen — at minimum the head was a value.
+            return
+
+        # No new label needed: continuation values accumulate under
+        # the same current_data_label.
+        if self.current_data_label is None:
+            # The label-required check fires at directive-introduction
+            # time; if we reach here it means someone deleted the
+            # label between directive and continuation. Defensive.
+            raise ParseError(
+                line.loc,
+                "data continuation has no associated label",
+            )
+
+        for v in values:
+            self.output_lines.append(f"    {directive} {v}")
+        self.current_data_label_bytes += elem_size * len(values)
+
+        if line.trailing_comment:
+            self.output_lines[-1] += f"    {line.trailing_comment}"
+
+    def _split_data_values(self, text: str) -> List[str]:
+        """Split a data-directive tail into individual values.
+
+        Accepts both whitespace-separated and comma-separated formats,
+        and a mix. Examples:
+          "0.5 0.75 1.0"      -> ["0.5", "0.75", "1.0"]
+          "0.5, 0.75, 1.0"    -> ["0.5", "0.75", "1.0"]
+          "0.5 0.75, 1.0"     -> ["0.5", "0.75", "1.0"]
+          "handler_a handler_b"  -> ["handler_a", "handler_b"]
+
+        Each returned value is a stripped, non-empty token. The
+        tokens are passed through to GAS verbatim — SMOLA does not
+        validate format (GAS reports any real malformation).
+        """
+        # Replace commas with spaces, then whitespace-split.
+        cleaned = text.replace(',', ' ')
+        return [tok for tok in cleaned.split() if tok]
 
     # ----- zap -----
 

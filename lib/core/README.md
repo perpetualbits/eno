@@ -5,7 +5,7 @@ Foundational utilities shared across all ENO libraries and productions.
 ## Planned contents
 
 - **Arena allocator**: single-block bump allocator with save/restore.
-  Currently lives in `lib/wavelet` and will move here once a second
+  Currently lives in `lib/crest` and will move here once a second
   library needs it.
 - **Fixed containers**: small-vector, ring buffer, fixed hash map — all
   with caller-provided storage, no malloc.

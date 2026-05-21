@@ -213,6 +213,18 @@ class Binding:
     storage: Storage
     scope_depth: int        # which scope frame owns this
     bound_at: Optional[SourceLoc] = None
+    # The width the user declared at the binding site, as the literal
+    # keyword they typed: "int", "i8", "u8", "i16", "u16", "i32", "u32",
+    # "i64", "u64", "ptr", "f32", "f64", "vec". Documentation only —
+    # the integer register file is 64-bit on RV64 regardless of the
+    # declared sub-word width. The bindings table at the function head
+    # uses this string verbatim so the user sees what they wrote.
+    #
+    # Empty string is allowed for backwards-compat with code paths
+    # that construct Bindings without a width (internal temporaries
+    # created by float-init synthesis, mostly). Those won't appear in
+    # the user-facing bindings table anyway.
+    declared_width: str = ""
 
 
 @dataclass
@@ -355,11 +367,19 @@ class Allocator:
 
     def alloc(self, name: str, var_type: VarType, storage: Storage,
               loc: Optional[SourceLoc] = None,
-              explicit_reg: Optional[str] = None) -> str:
+              explicit_reg: Optional[str] = None,
+              declared_width: str = "") -> str:
         """Allocate a register for a new named binding.
 
         Public entry. Validates the name, rejects (VEC, S), delegates
         to the pool-pop logic.
+
+        `declared_width` is the literal type keyword the user wrote
+        ("int", "u8", "f32", etc.). It's stored on the Binding for
+        display in the bindings table; allocation logic doesn't use
+        it. Empty string is allowed (e.g. for internal float-init
+        transient temporaries that don't appear in the user-facing
+        table).
         """
         self._check_new_name(name, loc)
 
@@ -380,17 +400,21 @@ class Allocator:
 
         pool = self._pool_for(var_type, storage)
         return self._alloc_from_pool(pool, var_type, storage, name, loc,
-                                      explicit_reg=explicit_reg)
+                                      explicit_reg=explicit_reg,
+                                      declared_width=declared_width)
 
     def _alloc_from_pool(self, pool: List[str], var_type: VarType,
                          storage: Storage, name: str,
                          loc: Optional[SourceLoc],
-                         explicit_reg: Optional[str] = None) -> str:
+                         explicit_reg: Optional[str] = None,
+                         declared_width: str = "") -> str:
         """Core allocation logic.
 
         Two paths: implicit round-robin (pop lowest-numbered) or
         explicit pinning (verify the requested register is in the
         right pool and free, then claim it).
+
+        See `alloc` for the role of `declared_width`.
         """
         if explicit_reg is not None:
             # Explicit pinning. Used for `int.a x = a3` and the
@@ -435,6 +459,7 @@ class Allocator:
         binding = Binding(
             name=name, reg=reg, var_type=var_type, storage=storage,
             scope_depth=self.current_depth, bound_at=loc,
+            declared_width=declared_width,
         )
         self.bindings[name] = binding
         self.reg_to_name[reg] = name

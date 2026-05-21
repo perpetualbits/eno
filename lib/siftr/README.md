@@ -1,6 +1,7 @@
-# lib/synth
+# lib/siftr — SIFTR softsynth
 
-Softsynth built on the wavelet stamping primitive.
+Softsynth built on the CREST wavelet stamping primitive. Operates in
+coefficient space throughout.
 
 ## Planned contents
 
@@ -12,6 +13,6 @@ Softsynth built on the wavelet stamping primitive.
 - **Note triggers**: high-level "play this atom at time t with pitch p
   and gain g" API.
 
-Depends on `lib/wavelet` and `lib/core`.
+Depends on `lib/crest` and `lib/core`.
 
 Currently empty placeholder.

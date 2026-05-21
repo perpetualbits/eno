@@ -1,0 +1,64 @@
+# wavelet_coefs.smola
+#
+# A small CDF 5/3 wavelet filter expressed as a data block plus a
+# kernel function that applies it. Demonstrates:
+#   - mixed-width data declarations (i16 for delta-coded coefficients,
+#     u8 for level counts, f32 for floating-point taps)
+#   - automatic alignment (the `.balign` directives are emitted by
+#     SMOLA, not by the user)
+#   - the `.size` directive on each labeled data block, so the linker
+#     knows the extent of each block
+#   - continuation lines (values on lines after the type keyword)
+#
+# In a real demo this data would be much larger and compression would
+# be the dominant concern. For illustration, the values here are
+# placeholder.
+
+.section .rodata
+
+# Delta-coded i16 coefficients for one wavelet sub-band. Stored as
+# i16 to halve the size relative to f32; the kernel undeltas and
+# upcasts at load time. Continuation lines show the natural way to
+# lay out structured data without losing the source's visual grouping.
+band_coefs:
+    i16  -3   1   2  -1   0   1
+          0  -1   2   1  -3   2
+          1  -2   0   1   0  -1
+
+# CDF 5/3 floating-point reconstruction taps. f32 because the kernel
+# does the reconstruction in single precision.
+cdf53_taps:
+    f32  -0.0625  0.5625  0.5625  -0.0625
+
+# Per-level shift counts for the delta decoder. u8 because the
+# largest level we ever see fits in a byte. This block sits right
+# after the f32 taps; SMOLA emits a .balign 1 before it, which is a
+# no-op given the f32s left us 4-byte aligned, but we emit it
+# unconditionally for clarity. GAS optimizes the redundant directive
+# away.
+level_shifts:
+    u8  0  1  2  3  4  5
+
+.section .text
+
+# undelta_one — decode a single delta-coded i16 and add to a running
+# accumulator. Tiny placeholder kernel; the real one would unroll
+# and use RVV. Demonstrates that the data block above is reachable
+# from code via la + i16-load.
+func undelta_one
+    ptr.a coefs                    # base of band_coefs
+    int.a index                    # which coefficient
+    i16 delta                      # the decoded coefficient
+    ptr cursor
+
+    # cursor = coefs + index * 2  (i16 is 2 bytes)
+    slli cursor, index, 1
+    add cursor, cursor, coefs
+    lh delta, 0(cursor)            # sign-extending load — i16 implies signed
+
+    # Free the inputs so we can write the return value into a0.
+    zap coefs, index, cursor
+
+    # Return the value in a0 for the caller.
+    mv a0, delta
+end

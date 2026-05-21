@@ -22,16 +22,16 @@ you ∞². I love you ε₀."
 ```
 eno/
 ├── lib/              Shared libraries (the ENO toolkit)
-│   ├── wavelet/        1D/2D/3D wavelets, chirplets, polar bases
-│   ├── synth/          Softsynth: stamps, envelopes, oscillators
+│   ├── crest/          1D/2D/3D wavelets, chirplets, polar bases (CREST)
+│   ├── siftr/          Softsynth: stamps, envelopes, oscillators (SIFTR)
 │   ├── fx/             Audio effects: reverb, chorus, etc.
 │   ├── gfx/            GLSL helpers, SDF primitives, post-fx
 │   ├── core/           Arena, math utils, fixed-size containers
 │   └── io/             WAV loading, OGG, raw resource bundling
 ├── tools/            Build/dev tools (run on host)
 │   ├── smolr/          (planned) Linux RISC-V executable packer
-│   ├── waveviz/        Audio/wavelet inspector & timeline GUI
-│   └── shaderbake/     Shader minification and packing
+│   ├── carve/          Wavelet/coefficient authoring tool (CARVE)
+│   └── glint/          GLSL shader minifier/packer (GLINT)
 ├── prods/            Demoscene productions
 │   └── desert-monument/  ENO #1, target: 64k Linux RISC-V
 ├── docs/             Design notes, post-mortems, theory
@@ -46,7 +46,7 @@ Each subdirectory is independently buildable with `make`. The top-level
 ```sh
 make                  # build everything
 make test             # run all test suites
-make -C lib/wavelet   # build just the wavelet library
+make -C lib/crest     # build just the CREST wavelet library
 make -C prods/desert-monument  # build the demo
 ```
 

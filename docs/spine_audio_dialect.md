@@ -3,7 +3,7 @@
 **Status:** v0.1 sketch.
 **Project:** Epsilon Null Operation (ε₀)
 **Companion to:** `spine_core_v0_3_design.md`, `spine_dialect_template.md`,
-`spine_runtime_model.md`, `carve_design.md` (forthcoming).
+`nerve_runtime_model.md`, `carve_design.md` (forthcoming).
 
 ---
 
@@ -685,7 +685,7 @@ instrument decides what to do with the previous instance's tail.
 
 ## 10. Lifetime and execution — runtime detail
 
-Implementation hand-off to NERVE. See `spine_runtime_model.md` for
+Implementation hand-off to NERVE. See `nerve_runtime_model.md` for
 broader runtime architecture.
 
 - **Audio output latency L:** NERVE introduces a fixed global latency

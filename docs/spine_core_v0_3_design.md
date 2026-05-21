@@ -4,7 +4,7 @@
 Project: Epsilon Null Operation (ε₀)
 Status: v0.3 draft — supersedes v0.2
 Companions: `spine_dialect_template.md`, `spine_open_questions.md`,
-`spine_runtime_model.md`
+`nerve_runtime_model.md`
 Purpose: extend v0.2 with gesture composition, three-level seed
 inheritance, sparse continuous modifiers, and gesture transitions, as
 required by the cello-dialect work.
@@ -565,7 +565,7 @@ derive an effective seed for each humanize invocation. Resolution is
 **offline**: the build tool walks every humanize-bearing entity,
 computes its effective seed, and embeds it in the binary form. The
 runtime never walks the entity tree at humanize evaluation time. See
-`spine_runtime_model.md` §6.
+`nerve_runtime_model.md` §6.
 
 **Constraint on roll-up.** The roll-up tool may NOT merge two USEs
 with different effective seeds, even if their surface MOD chain is
@@ -590,7 +590,7 @@ phrase ending {
 
 The dialect's transition resolver may need runtime state in some
 cases (humanize-perturbed bow position at the moment of transition);
-see `spine_runtime_model.md` §9.6.
+see `nerve_runtime_model.md` §9.6.
 
 ---
 

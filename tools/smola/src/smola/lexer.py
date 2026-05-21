@@ -47,45 +47,124 @@ from .mnemonics import is_known_mnemonic
 # keyword ever conflicts with a real mnemonic, the keyword wins and
 # we'd need to rename either it or fall back on a different mechanism.
 # None currently conflict.
-SMOLA_KEYWORDS = frozenset({
-    # Block-shaping
-    "func", "end", "scope", "endscope",
-    # Declarations and lifetimes
-    "struct", "stack", "zap",
-    # Type declarations (the bare type names act as keywords; the
-    # storage suffixes like 'int.s', 'int.a', 'flt.s', 'flt.a' are
-    # parsed by the translator on the first token after splitting at
-    # the dot).
-    "int", "ptr", "flt", "vec",
-    # Variants with storage suffix. We list each explicitly so the
-    # lexer doesn't need to know about the suffix syntax. The
-    # translator dispatches on these.
-    "int.s", "int.a", "ptr.s", "ptr.a",
-    "flt.s", "flt.a", "vec.a",
-    # Float field types (used in initialization, e.g. `f32 gain 0.75`).
-    "f32", "f64",
-    "f32.s", "f32.a", "f64.s", "f64.a",
-    # Struct field access
-    "load_field", "store_field", "addr_field",
-    # Argument-shuffling call (raw `call` is a RISC-V pseudo-insn and
-    # is handled differently; see translator's `_handle_call_line`).
-    # Note: we do NOT add 'call' to SMOLA_KEYWORDS because it conflicts
-    # with the standard RISC-V `call` pseudo-instruction. The
-    # translator distinguishes raw `call target` from SMOLA `call
-    # target, args...` by whether a comma appears in the tail.
+#
+# The keyword vocabulary covers three categories of type-naming:
+#
+#   - default declarations: `int`, `ptr`, `f32`, `f64`, `vec`. The
+#     ones you reach for when the width is the obvious default (`int`
+#     = use the integer register file, width per-instruction) or when
+#     the width is fixed by the type's nature (`ptr` is always 8
+#     bytes, `f32` is always 4 bytes).
+#
+#   - width-typed integer variants: `i8`/`u8`/.../`u64`. Used when
+#     the user wants to document at the declaration site exactly what
+#     width the variable holds. Same allocation pool as `int` — the
+#     register file is 64-bit regardless. The width is documentation
+#     only and appears in the bindings table of the generated `.s`.
+#
+#   - struct field types: these are the same as the data-section type
+#     keywords (handled as the second meaning of the same words in a
+#     data section context). The struct parser uses these directly.
+#
+# Note: `flt` was a v0.3 keyword that is REMOVED in this refinement.
+# Use `f32` or `f64` instead. The lexer will reject `flt` as an
+# unknown mnemonic; the translator catches that early-but-not-too-
+# early and gives a helpful migration hint.
+#
+# Storage suffixes `.s` (callee-saved) and `.a` (argument) are
+# allowed on every register-declaration keyword. We list each
+# (keyword, suffix) combination as a separate entry so the lexer can
+# match the whole token in one hash lookup.
+def _build_keywords() -> frozenset:
+    """Build the SMOLA keyword set from a small structured spec.
+
+    Returns a frozenset of every legal SMOLA-keyword token form. The
+    function exists so the keyword set is auditable as a structure
+    rather than as a flat 40-entry list — adding a new width to the
+    integer family or a new storage class only edits one line here.
+    """
+    out = set()
+
+    # Block-shaping and lifetime keywords.
+    out.update({
+        "func", "end", "scope", "endscope",
+        "struct", "stack", "zap",
+    })
+
+    # Field access pseudo-instructions.
+    out.update({"load_field", "store_field", "addr_field"})
+
     # Raw escape hatch.
-    "raw",
-})
+    out.add("raw")
+
+    # Register-typed declaration keywords. Bare form + .s suffix +
+    # .a suffix. `vec.s` is intentionally omitted because the RVV ABI
+    # defines no callee-saved vector registers; the regalloc rejects
+    # the combination separately if it ever reaches that layer.
+    int_widths = ["int", "i8", "u8", "i16", "u16",
+                  "i32", "u32", "i64", "u64"]
+    for kw in int_widths:
+        out.add(kw)            # bare declaration
+        out.add(f"{kw}.s")     # callee-saved
+        out.add(f"{kw}.a")     # argument
+
+    # Pointer keyword (always 8 bytes, no width variants).
+    for kw in ["ptr"]:
+        out.add(kw)
+        out.add(f"{kw}.s")
+        out.add(f"{kw}.a")
+
+    # Float keywords. Explicit precision required — no `flt` alias.
+    for kw in ["f32", "f64"]:
+        out.add(kw)
+        out.add(f"{kw}.s")
+        out.add(f"{kw}.a")
+
+    # Vector keyword. No .s variant (RVV ABI has no callee-saved
+    # vector registers). The .a variant exists for vector arguments.
+    out.add("vec")
+    out.add("vec.a")
+
+    return frozenset(out)
+
+
+SMOLA_KEYWORDS = _build_keywords()
+
+
+# Tokens that, if seen as the first token of a line, produce a
+# helpful migration hint pointing at the v0.3 → v0.3-refined change
+# rather than the generic "unknown mnemonic" error. Used by the
+# lexer's error path. Each entry is (bad_token -> message_text).
+DEPRECATED_KEYWORDS = {
+    "flt":   "use `f32` or `f64` (the `flt` keyword was removed)",
+    "flt.s": "use `f32.s` or `f64.s`",
+    "flt.a": "use `f32.a` or `f64.a`",
+}
 
 
 class LineKind(Enum):
-    """The five-way classification the translator dispatches on."""
+    """The line classifications the translator dispatches on.
+
+    Most LineKinds are decided purely from the line's content. The
+    DATA_VALUES kind is special: the lexer assigns it whenever the
+    line's first token looks like a numeric literal, but the
+    translator only *accepts* it as a continuation if the current
+    section is a data section and the previous emission was a data
+    directive. Outside that specific context, DATA_VALUES is treated
+    as a strict-typo error by the translator (with the same kind of
+    "unknown mnemonic" diagnostic the lexer would have produced).
+
+    This split (lexer recognizes shape, translator owns semantics)
+    keeps the lexer stateless across lines.
+    """
     BLANK = "blank"             # empty / whitespace
     COMMENT = "comment"         # `#` or `//` line
     LABEL = "label"             # `<ident>:` or `.L<id>:`
     GAS_DIRECTIVE = "gas"       # starts with `.` (not a label)
     SMOLA = "smola"             # first token is a SMOLA keyword
     RV_INSN = "rv_insn"         # first token is a known RV mnemonic
+    DATA_VALUES = "data_values" # first token is a numeric literal
+                                # (only valid as data continuation)
 
 
 @dataclass
@@ -224,18 +303,38 @@ def lex_line(filename: str, line_no: int, raw: str) -> Line:
                     head=head, tail=tail,
                     trailing_comment=trail)
 
-    # Special case for the `call` mnemonic: GAS treats `call` as a
-    # pseudo-instruction, but SMOLA needs to distinguish raw
-    # `call target` from SMOLA `call target, arg1, arg2`. We classify
-    # `call` as RV_INSN here; the translator examines the tail to
-    # decide which path to take.
-    #
-    # The same logic applies in spirit to any pseudo-instruction that
-    # SMOLA might want to extend, though `call` is the only one in v0.3.
+    # Rule 6b: deprecated SMOLA keyword. Catches the removed `flt`
+    # family and any future deprecated forms before falling through
+    # to the generic "unknown mnemonic" error. The hint is more
+    # actionable for these specific cases.
+    if head in DEPRECATED_KEYWORDS:
+        raise LexError(
+            loc,
+            f"keyword {head!r} is no longer supported",
+            hint=DEPRECATED_KEYWORDS[head],
+        )
 
     # Rule 7: known RISC-V mnemonic.
     if is_known_mnemonic(head):
         return Line(loc=loc, kind=LineKind.RV_INSN,
+                    head=head, tail=tail,
+                    trailing_comment=trail)
+
+    # Rule 7b: data-values continuation candidate. The line's first
+    # token looks like a numeric literal — a hex/dec/octal integer,
+    # a float, or a sign-prefixed number. The lexer doesn't have
+    # enough state to know if this is a legitimate data continuation
+    # or a stray fragment of text; it classifies as DATA_VALUES and
+    # lets the translator decide.
+    #
+    # Symbol-reference continuations (e.g. a jump table where each
+    # entry is an identifier) are NOT caught here — they'd look like
+    # bare identifiers and trip the unknown-mnemonic check below.
+    # For those, the user repeats the type keyword on each line.
+    # Numeric-data continuations (coefficient blocks, byte arrays)
+    # work seamlessly.
+    if _looks_like_numeric_literal(head):
+        return Line(loc=loc, kind=LineKind.DATA_VALUES,
                     head=head, tail=tail,
                     trailing_comment=trail)
 
@@ -258,6 +357,47 @@ def lex_line(filename: str, line_no: int, raw: str) -> Line:
             "a GAS directive starting with '.', or a label"
         ),
     )
+
+
+def _looks_like_numeric_literal(s: str) -> bool:
+    """Does `s` look like a numeric literal in GAS-compatible form?
+
+    Accepts:
+      - integer literals with optional sign: `42`, `-5`, `+1`
+      - hex literals: `0x1A`, `-0xff`
+      - octal literals: `0755`
+      - binary literals: `0b1010` (some GAS dialects accept)
+      - decimal floats: `0.5`, `-1.5`, `.5`
+      - scientific notation: `1e3`, `1.5e-10`, `-1.234e+5`
+      - hex floats: `0x1.fp3` (C99-style, accepted by recent GAS)
+
+    Does NOT accept identifiers that happen to start with a digit
+    (which would be invalid anyway), and does NOT accept symbol
+    references (which the data-continuation rule doesn't cover).
+
+    The function is a syntactic shape check, not a full parser —
+    `1.2.3` would pass the shape check but GAS would reject it.
+    SMOLA passes the literal through unchanged; GAS reports any
+    real numeric malformation at assembly time. We just need to be
+    confident "this looks like a number, not an identifier."
+    """
+    if not s:
+        return False
+    # Strip a leading sign for the rest of the analysis.
+    rest = s[1:] if s[0] in '+-' else s
+    if not rest:
+        return False
+    # Hex literal (optionally with hex float).
+    if rest.startswith(('0x', '0X')):
+        return len(rest) > 2 and all(
+            c in '0123456789abcdefABCDEF.pP+-' for c in rest[2:]
+        )
+    # Plain numeric: must start with a digit or `.<digit>`.
+    if rest[0].isdigit():
+        return True
+    if rest[0] == '.' and len(rest) > 1 and rest[1].isdigit():
+        return True
+    return False
 
 
 def lex_source(filename: str, text: str) -> List[Line]:

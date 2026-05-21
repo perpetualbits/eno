@@ -1,17 +1,17 @@
 # render_square — fills a pixel buffer with a solid value.
-# Demonstrates initialization shorthand for int and flt, scoped
+# Demonstrates initialization shorthand for int and f32, scoped
 # loops, and the auto-bindings-table at the function head.
 
 func render_square
     ptr.a fb                       # framebuffer base
-    int.a width                    # pixel count
-    int.a value                    # color value (u32 packed)
+    u32.a width                    # pixel count (u32 to document intent)
+    u32.a value                    # packed color value
 
     # Walking pointer; counter; gain factor for a hypothetical
     # follow-up blend step (unused below, here as a demo).
     ptr cursor
-    int counter 4096
-    flt gain 0.75
+    u32 counter 4096
+    f32 gain 0.75
 
     mv cursor, fb
     mv counter, width

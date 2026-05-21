@@ -148,7 +148,7 @@ A transition table entry typically declares:
   (`continue_bow`, `lift_then_attack`, `crossfade_over_N_ticks`)
 - **runtime_state_needed** — bool. If true, the resolver requires
   inspecting the previous gesture's live state and cannot be fully
-  resolved offline. See `spine_runtime_model.md` §9.6.
+  resolved offline. See `nerve_runtime_model.md` §9.6.
 
 Most dialects do not have transitions and skip this section.
 
@@ -505,7 +505,7 @@ cello.gesture.pizzicato           cello.gesture.*       bow_recover
 Most transitions can resolve offline. `lift_and_settle` after a
 humanized martélé needs to know the bow's perturbed position at the
 moment of release; that resolver flag's runtime_state_needed = true.
-See `spine_runtime_model.md` §9.6.
+See `nerve_runtime_model.md` §9.6.
 
 ### 3.9 Interpreter notes
 

@@ -59,21 +59,20 @@ When a document is added or renamed, update this file in the same session.
   tables.
 - **Status:** working draft v0.1 sketch
 - **Notes:** consumed by CARVE and NERVE. Cross-references
-  `spine_runtime_model.md` and `crest_design.md`.
+  `nerve_runtime_model.md` and `crest_design.md`.
 
 ---
 
 ## 3. NERVE — the runtime
 
-### `spine_runtime_model.md`
+### `nerve_runtime_model.md`
 
 - **Scope:** runtime model for SPINE-based demos on RISC-V. Lifetime
   classes, threading, core affinity, seed resolution, frame budgets,
   allocation strategy, open runtime questions.
 - **Status:** skeleton v0.1
-- **Notes:** the runtime is named **NERVE** as of 2026-05-17. The
-  filename will be renamed to `nerve_runtime_model.md` in a future
-  cleanup pass.
+- **Notes:** the runtime is named **NERVE** (named 2026-05-17).
+  Filename updated 2026-05-21.
 
 ---
 
@@ -151,14 +150,34 @@ When a document is added or renamed, update this file in the same session.
   formant stack, noise, impulse), `crest_2d` (terrain, sand, smoke
   fields), `crest_3d` (volumetric cliff/cave geometry, SDF volumes).
 - **Status:** working draft v0.1 (2026-05-18)
-- **Canonical code location:** `lib/wavelet/` (to be renamed
-  `lib/crest/` in one atomic commit; document §9 covers migration).
+- **Canonical code location:** `lib/crest/`
 - **Notes:** float32 throughout. RVV kernels planned per module.
-  26 tests passing in `crest_core`. Named CREST as of 2026-05-18.
+  26 tests passing in `crest_core`. Named CREST 2026-05-18; directory
+  renamed 2026-05-21.
 
 ---
 
-## 9. Project-wide
+## 9. GLINT — the GLSL shader minifier/packer
+
+- **Scope:** GLSL shader minification and packing for size-coded
+  productions.
+- **Status:** stub (directory exists: `tools/glint/`)
+- **Notes:** named GLINT 2026-05-21. Replaces placeholder `tools/shaderbake/`.
+  Design document (`glint_design.md`) not yet written.
+
+---
+
+## 10. SIFTR — the softsynth
+
+- **Scope:** wavelet-coefficient-space softsynth built on CREST. Stamps,
+  envelopes, oscillator banks, voice management, note triggers.
+- **Status:** stub (directory exists: `lib/siftr/`)
+- **Notes:** named SIFTR 2026-05-21. Replaces placeholder `lib/synth/`.
+  Design document (`siftr_design.md`) not yet written.
+
+---
+
+## 11. Project-wide
 
 ### `eno_project_index.md` (this file)
 
@@ -172,8 +191,10 @@ When a document is added or renamed, update this file in the same session.
 
 ---
 
-## 10. Future documents (placeholders)
+## 12. Future documents (placeholders)
 
+- `glint_design.md` — GLINT design document (when enough scoping exists).
+- `siftr_design.md` — SIFTR design document (when enough scoping exists).
 - `spine_cello_dialect.md` — when the cello dialect graduates from
   sketch to its own document.
 - `spine_graphics_dialect.md` — for procedural graphics, shaders.
@@ -187,7 +208,7 @@ When a document is added or renamed, update this file in the same session.
 
 ---
 
-## 11. How chats should use this
+## 13. How chats should use this
 
 **At the start of a chat:** read this file. Read `eno_decision_log.md`.
 Identify which subsystem the chat is about. Read that subsystem's
